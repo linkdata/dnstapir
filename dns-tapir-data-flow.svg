@@ -260,13 +260,15 @@
     </g>
   </a>
 
-  <g id="core-mqtt">
-    <rect x="350" y="242" width="135" height="96" class="node"/>
-    <text x="417.5" y="270" text-anchor="middle" class="node-title">Core MQTT</text>
-    <text x="417.5" y="289" text-anchor="middle" class="node-title">broker</text>
-    <text x="417.5" y="313" text-anchor="middle" class="node-text">mTLS ingress</text>
-    <text x="417.5" y="329" text-anchor="middle" class="node-text">edge topics</text>
-  </g>
+  <a class="repo-link" href="https://github.com/eclipse-mosquitto/mosquitto" target="_blank" rel="noopener noreferrer" aria-label="Open Eclipse Mosquitto on GitHub">
+    <g id="core-mqtt">
+      <rect x="350" y="242" width="135" height="96" class="node"/>
+      <text x="417.5" y="270" text-anchor="middle" class="node-title">Core MQTT</text>
+      <text x="417.5" y="289" text-anchor="middle" class="node-title">broker</text>
+      <text x="417.5" y="313" text-anchor="middle" class="node-text">Mosquitto</text>
+      <text x="417.5" y="329" text-anchor="middle" class="node-text">mTLS edge topics</text>
+    </g>
+  </a>
 
   <a class="repo-link" href="https://github.com/dnstapir/mqtt-bridge" target="_blank" rel="noopener noreferrer" aria-label="Open dnstapir/mqtt-bridge on GitHub">
     <g id="bridge-up">
@@ -278,13 +280,15 @@
     </g>
   </a>
 
-  <g id="nats-events">
-    <rect x="660" y="242" width="135" height="96" class="node"/>
-    <text x="727.5" y="270" text-anchor="middle" class="node-title">NATS</text>
-    <text x="727.5" y="289" text-anchor="middle" class="node-title">events</text>
-    <text x="727.5" y="313" text-anchor="middle" class="node-text">new_qname</text>
-    <text x="727.5" y="329" text-anchor="middle" class="node-text">subject</text>
-  </g>
+  <a class="repo-link" href="https://github.com/nats-io/nats-server" target="_blank" rel="noopener noreferrer" aria-label="Open NATS server on GitHub">
+    <g id="nats-events">
+      <rect x="660" y="242" width="135" height="96" class="node"/>
+      <text x="727.5" y="270" text-anchor="middle" class="node-title">NATS</text>
+      <text x="727.5" y="289" text-anchor="middle" class="node-title">events</text>
+      <text x="727.5" y="313" text-anchor="middle" class="node-text">new_qname</text>
+      <text x="727.5" y="329" text-anchor="middle" class="node-text">subject</text>
+    </g>
+  </a>
 
   <a class="repo-link" href="https://github.com/dnstapir/tapir-analyse-new-qname" target="_blank" rel="noopener noreferrer" aria-label="Open dnstapir/tapir-analyse-new-qname on GitHub">
     <g id="new-qname-analyzer">
@@ -389,25 +393,29 @@
   <path d="M 382 382 C 382 350 340 332 320 315" class="flow flow-mqtt"/>
 
   <!-- NATS observation detail -->
-  <g id="nats-observation-kv">
-    <rect x="820" y="412" width="145" height="84" class="node node-accent"/>
-    <text x="892.5" y="440" text-anchor="middle" class="node-title">NATS KV</text>
-    <text x="892.5" y="463" text-anchor="middle" class="node-text">globally_new</text>
-    <text x="892.5" y="480" text-anchor="middle" class="node-text">seen_domains</text>
-  </g>
+  <a class="repo-link" href="https://github.com/nats-io/nats-server" target="_blank" rel="noopener noreferrer" aria-label="Open NATS server on GitHub">
+    <g id="nats-observation-kv">
+      <rect x="820" y="412" width="145" height="84" class="node node-accent"/>
+      <text x="892.5" y="440" text-anchor="middle" class="node-title">NATS KV</text>
+      <text x="892.5" y="463" text-anchor="middle" class="node-text">globally_new</text>
+      <text x="892.5" y="480" text-anchor="middle" class="node-text">seen_domains</text>
+    </g>
+  </a>
   <path d="M 892 348 L 892 412" class="flow flow-nats"/>
   <rect x="910" y="371" width="91" height="20" class="label-bg"/>
   <text x="955.5" y="385" text-anchor="middle" class="flow-label">globally_new</text>
   <path d="M 965 454 C 1015 454 1038 386 1055 338" class="flow flow-nats"/>
 
   <!-- EDM side branch: histograms and aggregates -->
-  <g id="histogram-parquet">
-    <rect x="350" y="510" width="150" height="90" class="node node-accent"/>
-    <text x="425" y="538" text-anchor="middle" class="node-title">Histogram</text>
-    <text x="425" y="557" text-anchor="middle" class="node-title">Parquet</text>
-    <text x="425" y="581" text-anchor="middle" class="node-text">well-known</text>
-    <text x="425" y="596" text-anchor="middle" class="node-text">qname aggregates</text>
-  </g>
+  <a class="repo-link" href="https://github.com/parquet-go/parquet-go" target="_blank" rel="noopener noreferrer" aria-label="Open parquet-go on GitHub">
+    <g id="histogram-parquet">
+      <rect x="350" y="510" width="150" height="90" class="node node-accent"/>
+      <text x="425" y="538" text-anchor="middle" class="node-title">Histogram</text>
+      <text x="425" y="557" text-anchor="middle" class="node-title">Parquet</text>
+      <text x="425" y="581" text-anchor="middle" class="node-text">well-known</text>
+      <text x="425" y="596" text-anchor="middle" class="node-text">qname aggregates</text>
+    </g>
+  </a>
 
   <a class="repo-link" href="https://github.com/dnstapir/aggrec" target="_blank" rel="noopener noreferrer" aria-label="Open dnstapir/aggrec on GitHub">
     <g id="aggrec">
@@ -419,21 +427,25 @@
     </g>
   </a>
 
-  <g id="aggregate-storage">
-    <rect x="750" y="510" width="175" height="90" class="node node-accent"/>
-    <text x="837.5" y="538" text-anchor="middle" class="node-title">Aggregate store</text>
-    <text x="837.5" y="560" text-anchor="middle" class="node-text">S3 object data</text>
-    <text x="837.5" y="576" text-anchor="middle" class="node-text">Mongo metadata</text>
-    <text x="837.5" y="596" text-anchor="middle" class="small-text">durable aggregate catalog</text>
-  </g>
+  <a class="repo-link" href="https://github.com/minio/minio" target="_blank" rel="noopener noreferrer" aria-label="Open MinIO on GitHub">
+    <g id="aggregate-storage">
+      <rect x="750" y="510" width="175" height="90" class="node node-accent"/>
+      <text x="837.5" y="538" text-anchor="middle" class="node-title">Aggregate store</text>
+      <text x="837.5" y="560" text-anchor="middle" class="node-text">MinIO/S3 objects</text>
+      <text x="837.5" y="576" text-anchor="middle" class="node-text">Mongo metadata</text>
+      <text x="837.5" y="596" text-anchor="middle" class="small-text">durable aggregate catalog</text>
+    </g>
+  </a>
 
-  <g id="aggregate-announcements">
-    <rect x="970" y="510" width="140" height="90" class="node node-accent"/>
-    <text x="1040" y="538" text-anchor="middle" class="node-title">Aggregate</text>
-    <text x="1040" y="557" text-anchor="middle" class="node-title">announcements</text>
-    <text x="1040" y="581" text-anchor="middle" class="node-text">MQTT or NATS</text>
-    <text x="1040" y="596" text-anchor="middle" class="node-text">metadata notice</text>
-  </g>
+  <a class="repo-link" href="https://github.com/nats-io/nats-server" target="_blank" rel="noopener noreferrer" aria-label="Open NATS server on GitHub">
+    <g id="aggregate-announcements">
+      <rect x="970" y="510" width="140" height="90" class="node node-accent"/>
+      <text x="1040" y="538" text-anchor="middle" class="node-title">Aggregate</text>
+      <text x="1040" y="557" text-anchor="middle" class="node-title">announcements</text>
+      <text x="1040" y="581" text-anchor="middle" class="node-text">MQTT or NATS</text>
+      <text x="1040" y="596" text-anchor="middle" class="node-text">metadata notice</text>
+    </g>
+  </a>
 
   <path d="M 258 356 C 258 455 330 475 405 510" class="flow flow-file"/>
   <rect x="244" y="446" width="138" height="35" class="label-bg"/>
@@ -455,13 +467,15 @@
   <text x="960" y="544" text-anchor="middle" class="flow-label">new file</text>
 
   <!-- EDM side branch: local session files -->
-  <g id="session-parquet">
-    <rect x="78" y="595" width="205" height="98" class="node node-accent"/>
-    <text x="180.5" y="624" text-anchor="middle" class="node-title">Local session Parquet</text>
-    <text x="180.5" y="647" text-anchor="middle" class="node-text">non-well-known qnames</text>
-    <text x="180.5" y="663" text-anchor="middle" class="node-text">complete DNS messages</text>
-    <text x="180.5" y="679" text-anchor="middle" class="node-text">pseudonymised client IPs</text>
-  </g>
+  <a class="repo-link" href="https://github.com/parquet-go/parquet-go" target="_blank" rel="noopener noreferrer" aria-label="Open parquet-go on GitHub">
+    <g id="session-parquet">
+      <rect x="78" y="595" width="205" height="98" class="node node-accent"/>
+      <text x="180.5" y="624" text-anchor="middle" class="node-title">Local session Parquet</text>
+      <text x="180.5" y="647" text-anchor="middle" class="node-text">non-well-known qnames</text>
+      <text x="180.5" y="663" text-anchor="middle" class="node-text">complete DNS messages</text>
+      <text x="180.5" y="679" text-anchor="middle" class="node-text">pseudonymised client IPs</text>
+    </g>
+  </a>
   <path d="M 225 356 C 145 430 145 520 180 595" class="flow flow-file"/>
   <rect x="70" y="504" width="145" height="35" class="label-bg"/>
   <text x="142.5" y="519" text-anchor="middle" class="flow-label">local analysis only</text>
