@@ -1,0 +1,506 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" role="img" viewBox="0 0 1600 950">
+  <title>DNS Tapir Data Flow</title>
+  <desc>
+    Architecture diagram showing DNS Tapir data flow from Resolver and EDM at the Edge,
+    through Core MQTT, MQTT bridge, NATS analyzers, observation encoding, downbound MQTT,
+    POP policy processing, RPZ output, and resolver enforcement. Side flows show EDM
+    histogram uploads to aggrec and local pseudonymised session Parquet files.
+  </desc>
+
+  <defs>
+    <marker id="arrow-dnstap" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#2f7d58"/>
+    </marker>
+    <marker id="arrow-mqtt" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#007c89"/>
+    </marker>
+    <marker id="arrow-http" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#7b3fb3"/>
+    </marker>
+    <marker id="arrow-nats" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#2f64d6"/>
+    </marker>
+    <marker id="arrow-file" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#6b7280"/>
+    </marker>
+    <marker id="arrow-rpz" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#c05621"/>
+    </marker>
+    <marker id="arrow-neutral" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <style>
+    svg {
+      background: #fbfcfe;
+      color: #172033;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      text-rendering: geometricPrecision;
+    }
+
+    .title {
+      fill: #111827;
+      font-size: 28px;
+      font-weight: 720;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      fill: #4b5563;
+      font-size: 14px;
+      font-weight: 500;
+      letter-spacing: 0;
+    }
+
+    .zone {
+      stroke-width: 1.2;
+      rx: 8;
+    }
+
+    .zone-edge {
+      fill: #eef8f1;
+      stroke: #b7d7bf;
+    }
+
+    .zone-core {
+      fill: #eef5ff;
+      stroke: #b8cbed;
+    }
+
+    .zone-policy {
+      fill: #fff5ea;
+      stroke: #e2bf8c;
+    }
+
+    .zone-title {
+      fill: #1f2937;
+      font-size: 16px;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+
+    .zone-subtitle {
+      fill: #5f6b7a;
+      font-size: 12px;
+      font-weight: 520;
+      letter-spacing: 0;
+    }
+
+    .node {
+      fill: #ffffff;
+      stroke: #cbd5e1;
+      stroke-width: 1.4;
+      rx: 7;
+      filter: drop-shadow(0 2px 4px rgba(31, 41, 55, 0.08));
+    }
+
+    .node-accent {
+      fill: #f8fafc;
+      stroke: #b6c2d1;
+    }
+
+    .repo-link {
+      cursor: pointer;
+    }
+
+    .repo-link:focus .node,
+    .repo-link:hover .node {
+      stroke: #0f766e;
+      stroke-width: 2;
+    }
+
+    .node-title {
+      fill: #172033;
+      font-size: 14px;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+
+    .node-text {
+      fill: #526070;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0;
+    }
+
+    .small-text {
+      fill: #526070;
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0;
+    }
+
+    .flow {
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2.6;
+    }
+
+    .flow-dnstap {
+      stroke: #2f7d58;
+      marker-end: url(#arrow-dnstap);
+    }
+
+    .flow-mqtt {
+      stroke: #007c89;
+      marker-end: url(#arrow-mqtt);
+    }
+
+    .flow-http {
+      stroke: #7b3fb3;
+      marker-end: url(#arrow-http);
+    }
+
+    .flow-nats {
+      stroke: #2f64d6;
+      marker-end: url(#arrow-nats);
+    }
+
+    .flow-file {
+      stroke: #6b7280;
+      stroke-dasharray: 7 6;
+      marker-end: url(#arrow-file);
+    }
+
+    .flow-rpz {
+      stroke: #c05621;
+      marker-end: url(#arrow-rpz);
+    }
+
+    .flow-neutral {
+      stroke: #475569;
+      marker-end: url(#arrow-neutral);
+    }
+
+    .label-bg {
+      fill: #ffffff;
+      stroke: #d8dee8;
+      stroke-width: 1;
+      rx: 5;
+    }
+
+    .flow-label {
+      fill: #263244;
+      font-size: 10.5px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+
+    .callout {
+      fill: #ffffff;
+      stroke: #d8dee8;
+      stroke-width: 1.1;
+      rx: 7;
+    }
+
+    .callout-title {
+      fill: #263244;
+      font-size: 12px;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+
+    .legend-title {
+      fill: #263244;
+      font-size: 13px;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+
+    .legend-text {
+      fill: #526070;
+      font-size: 11px;
+      font-weight: 560;
+      letter-spacing: 0;
+    }
+  </style>
+
+  <rect x="0" y="0" width="1600" height="950" fill="#fbfcfe"/>
+
+  <text x="42" y="50" class="title">DNS Tapir Data Flow</text>
+  <text x="42" y="74" class="subtitle">
+    Edge collection, Core event analysis, southbound policy delivery, and resolver enforcement
+  </text>
+
+  <rect x="30" y="112" width="295" height="646" class="zone zone-edge"/>
+  <text x="48" y="143" class="zone-title">Edge</text>
+  <text x="48" y="162" class="zone-subtitle">Resolver telemetry and minimisation</text>
+
+  <rect x="340" y="112" width="920" height="646" class="zone zone-core"/>
+  <text x="358" y="143" class="zone-title">Core</text>
+  <text x="358" y="162" class="zone-subtitle">Ingress, validation, analysis, aggregate reception, and southbound encoding</text>
+
+  <rect x="1280" y="112" width="290" height="646" class="zone zone-policy"/>
+  <text x="1298" y="143" class="zone-title">Policy and Resolver</text>
+  <text x="1298" y="162" class="zone-subtitle">Local policy merge and enforcement</text>
+
+  <!-- Main path nodes -->
+  <a class="repo-link" href="https://github.com/dnstapir/unbound" target="_blank" rel="noopener noreferrer" aria-label="Open dnstapir/unbound on GitHub">
+    <g id="resolver-source">
+      <rect x="50" y="242" width="125" height="96" class="node"/>
+      <text x="112.5" y="270" text-anchor="middle" class="node-title">Resolver</text>
+      <text x="112.5" y="289" text-anchor="middle" class="node-title">Unbound</text>
+      <text x="112.5" y="311" text-anchor="middle" class="node-text">DNS traffic</text>
+      <text x="112.5" y="328" text-anchor="middle" class="node-text">DNSTAP enabled</text>
+    </g>
+  </a>
+
+  <a class="repo-link" href="https://github.com/dnstapir/edm" target="_blank" rel="noopener noreferrer" aria-label="Open dnstapir/edm on GitHub">
+    <g id="edm">
+      <rect x="195" y="224" width="125" height="132" class="node"/>
+      <text x="257.5" y="252" text-anchor="middle" class="node-title">EDM</text>
+      <text x="257.5" y="273" text-anchor="middle" class="node-text">Edge DNSTAP</text>
+      <text x="257.5" y="289" text-anchor="middle" class="node-text">Minimiser</text>
+      <text x="257.5" y="313" text-anchor="middle" class="small-text">DAWG well-known</text>
+      <text x="257.5" y="328" text-anchor="middle" class="small-text">Crypto-PAn IPs</text>
+      <text x="257.5" y="343" text-anchor="middle" class="small-text">first-seen qnames</text>
+    </g>
+  </a>
+
+  <g id="core-mqtt">
+    <rect x="350" y="242" width="135" height="96" class="node"/>
+    <text x="417.5" y="270" text-anchor="middle" class="node-title">Core MQTT</text>
+    <text x="417.5" y="289" text-anchor="middle" class="node-title">broker</text>
+    <text x="417.5" y="313" text-anchor="middle" class="node-text">mTLS ingress</text>
+    <text x="417.5" y="329" text-anchor="middle" class="node-text">edge topics</text>
+  </g>
+
+  <a class="repo-link" href="https://github.com/dnstapir/mqtt-bridge" target="_blank" rel="noopener noreferrer" aria-label="Open dnstapir/mqtt-bridge on GitHub">
+    <g id="bridge-up">
+      <rect x="505" y="242" width="135" height="96" class="node"/>
+      <text x="572.5" y="270" text-anchor="middle" class="node-title">mqtt-bridge</text>
+      <text x="572.5" y="289" text-anchor="middle" class="node-title">upbound</text>
+      <text x="572.5" y="313" text-anchor="middle" class="node-text">verify JWS</text>
+      <text x="572.5" y="329" text-anchor="middle" class="node-text">schema check</text>
+    </g>
+  </a>
+
+  <g id="nats-events">
+    <rect x="660" y="242" width="135" height="96" class="node"/>
+    <text x="727.5" y="270" text-anchor="middle" class="node-title">NATS</text>
+    <text x="727.5" y="289" text-anchor="middle" class="node-title">events</text>
+    <text x="727.5" y="313" text-anchor="middle" class="node-text">new_qname</text>
+    <text x="727.5" y="329" text-anchor="middle" class="node-text">subject</text>
+  </g>
+
+  <a class="repo-link" href="https://github.com/dnstapir/tapir-analyse-new-qname" target="_blank" rel="noopener noreferrer" aria-label="Open dnstapir/tapir-analyse-new-qname on GitHub">
+    <g id="new-qname-analyzer">
+      <rect x="820" y="232" width="145" height="116" class="node"/>
+      <text x="892.5" y="259" text-anchor="middle" class="node-title">tapir-analyse</text>
+      <text x="892.5" y="278" text-anchor="middle" class="node-title">new-qname</text>
+      <text x="892.5" y="302" text-anchor="middle" class="node-text">deduplicate</text>
+      <text x="892.5" y="318" text-anchor="middle" class="node-text">seen domains</text>
+      <text x="892.5" y="334" text-anchor="middle" class="node-text">set observations</text>
+    </g>
+  </a>
+
+  <a class="repo-link" href="https://github.com/dnstapir/observation-encoder" target="_blank" rel="noopener noreferrer" aria-label="Open dnstapir/observation-encoder on GitHub">
+    <g id="observation-encoder">
+      <rect x="995" y="242" width="135" height="96" class="node"/>
+      <text x="1062.5" y="270" text-anchor="middle" class="node-title">Observation</text>
+      <text x="1062.5" y="289" text-anchor="middle" class="node-title">encoder</text>
+      <text x="1062.5" y="313" text-anchor="middle" class="node-text">build TAPIR</text>
+      <text x="1062.5" y="329" text-anchor="middle" class="node-text">doubtlist update</text>
+    </g>
+  </a>
+
+  <a class="repo-link" href="https://github.com/dnstapir/mqtt-bridge" target="_blank" rel="noopener noreferrer" aria-label="Open dnstapir/mqtt-bridge on GitHub">
+    <g id="bridge-down">
+      <rect x="1155" y="242" width="140" height="96" class="node"/>
+      <text x="1225" y="270" text-anchor="middle" class="node-title">mqtt-bridge</text>
+      <text x="1225" y="289" text-anchor="middle" class="node-title">downbound</text>
+      <text x="1225" y="313" text-anchor="middle" class="node-text">sign payload</text>
+      <text x="1225" y="329" text-anchor="middle" class="node-text">publish to edge</text>
+    </g>
+  </a>
+
+  <a class="repo-link" href="https://github.com/dnstapir/pop" target="_blank" rel="noopener noreferrer" aria-label="Open dnstapir/pop on GitHub">
+    <g id="pop">
+      <rect x="1320" y="242" width="105" height="96" class="node"/>
+      <text x="1372.5" y="270" text-anchor="middle" class="node-title">POP</text>
+      <text x="1372.5" y="291" text-anchor="middle" class="node-text">policy</text>
+      <text x="1372.5" y="307" text-anchor="middle" class="node-text">processor</text>
+      <text x="1372.5" y="329" text-anchor="middle" class="small-text">merge intel</text>
+    </g>
+  </a>
+
+  <a class="repo-link" href="https://github.com/dnstapir/unbound" target="_blank" rel="noopener noreferrer" aria-label="Open dnstapir/unbound on GitHub">
+    <g id="resolver-policy">
+      <rect x="1450" y="242" width="110" height="96" class="node"/>
+      <text x="1505" y="270" text-anchor="middle" class="node-title">Resolver</text>
+      <text x="1505" y="289" text-anchor="middle" class="node-title">policy</text>
+      <text x="1505" y="313" text-anchor="middle" class="node-text">RPZ loaded</text>
+      <text x="1505" y="329" text-anchor="middle" class="node-text">enforcement</text>
+    </g>
+  </a>
+
+  <!-- Main path flows -->
+  <path d="M 175 290 L 195 290" class="flow flow-dnstap"/>
+  <rect x="176" y="259" width="42" height="20" class="label-bg"/>
+  <text x="197" y="273" text-anchor="middle" class="flow-label">DNSTAP</text>
+
+  <path d="M 320 290 L 350 290" class="flow flow-mqtt"/>
+  <rect x="326" y="184" width="122" height="35" class="label-bg"/>
+  <text x="387" y="199" text-anchor="middle" class="flow-label">signed JWS</text>
+  <text x="387" y="213" text-anchor="middle" class="flow-label">new_qname MQTT</text>
+
+  <path d="M 485 290 L 505 290" class="flow flow-mqtt"/>
+  <rect x="462" y="349" width="72" height="20" class="label-bg"/>
+  <text x="498" y="363" text-anchor="middle" class="flow-label">events/up/#</text>
+
+  <path d="M 640 290 L 660 290" class="flow flow-nats"/>
+  <rect x="617" y="203" width="94" height="35" class="label-bg"/>
+  <text x="664" y="218" text-anchor="middle" class="flow-label">validated event</text>
+  <text x="664" y="232" text-anchor="middle" class="flow-label">with key headers</text>
+
+  <path d="M 795 290 L 820 290" class="flow flow-nats"/>
+  <rect x="783" y="349" width="64" height="20" class="label-bg"/>
+  <text x="815" y="363" text-anchor="middle" class="flow-label">new_qname</text>
+
+  <path d="M 965 290 L 995 290" class="flow flow-nats"/>
+  <rect x="952" y="184" width="93" height="35" class="label-bg"/>
+  <text x="998.5" y="199" text-anchor="middle" class="flow-label">KV watch</text>
+  <text x="998.5" y="213" text-anchor="middle" class="flow-label">observations</text>
+
+  <path d="M 1130 290 L 1155 290" class="flow flow-nats"/>
+  <rect x="1117" y="349" width="96" height="35" class="label-bg"/>
+  <text x="1165" y="364" text-anchor="middle" class="flow-label">TAPIR doubtlist</text>
+  <text x="1165" y="378" text-anchor="middle" class="flow-label">southbound</text>
+
+  <path d="M 1295 290 L 1320 290" class="flow flow-mqtt"/>
+  <rect x="1265" y="203" width="92" height="35" class="label-bg"/>
+  <text x="1311" y="218" text-anchor="middle" class="flow-label">signed MQTT</text>
+  <text x="1311" y="232" text-anchor="middle" class="flow-label">observations</text>
+
+  <path d="M 1425 290 L 1450 290" class="flow flow-rpz"/>
+  <rect x="1402" y="349" width="105" height="35" class="label-bg"/>
+  <text x="1454.5" y="364" text-anchor="middle" class="flow-label">RPZ AXFR/IXFR</text>
+  <text x="1454.5" y="378" text-anchor="middle" class="flow-label">and NOTIFY</text>
+
+  <!-- Topic callout -->
+  <g id="mqtt-topic-callout">
+    <rect x="365" y="382" width="372" height="54" class="callout"/>
+    <text x="383" y="405" class="callout-title">EDM MQTT topic</text>
+    <text x="383" y="424" class="node-text">events/up/&lt;kid&gt;/new_qname, where &lt;kid&gt; is the signing JWK key id</text>
+  </g>
+  <path d="M 382 382 C 382 350 340 332 320 315" class="flow flow-mqtt"/>
+
+  <!-- NATS observation detail -->
+  <g id="nats-observation-kv">
+    <rect x="820" y="412" width="145" height="84" class="node node-accent"/>
+    <text x="892.5" y="440" text-anchor="middle" class="node-title">NATS KV</text>
+    <text x="892.5" y="463" text-anchor="middle" class="node-text">globally_new</text>
+    <text x="892.5" y="480" text-anchor="middle" class="node-text">seen_domains</text>
+  </g>
+  <path d="M 892 348 L 892 412" class="flow flow-nats"/>
+  <rect x="910" y="371" width="91" height="20" class="label-bg"/>
+  <text x="955.5" y="385" text-anchor="middle" class="flow-label">globally_new</text>
+  <path d="M 965 454 C 1015 454 1038 386 1055 338" class="flow flow-nats"/>
+
+  <!-- EDM side branch: histograms and aggregates -->
+  <g id="histogram-parquet">
+    <rect x="350" y="510" width="150" height="90" class="node node-accent"/>
+    <text x="425" y="538" text-anchor="middle" class="node-title">Histogram</text>
+    <text x="425" y="557" text-anchor="middle" class="node-title">Parquet</text>
+    <text x="425" y="581" text-anchor="middle" class="node-text">well-known</text>
+    <text x="425" y="596" text-anchor="middle" class="node-text">qname aggregates</text>
+  </g>
+
+  <a class="repo-link" href="https://github.com/dnstapir/aggrec" target="_blank" rel="noopener noreferrer" aria-label="Open dnstapir/aggrec on GitHub">
+    <g id="aggrec">
+      <rect x="550" y="510" width="145" height="90" class="node"/>
+      <text x="622.5" y="538" text-anchor="middle" class="node-title">aggrec</text>
+      <text x="622.5" y="559" text-anchor="middle" class="node-text">aggregate</text>
+      <text x="622.5" y="575" text-anchor="middle" class="node-text">receiver</text>
+      <text x="622.5" y="596" text-anchor="middle" class="small-text">HTTP signatures</text>
+    </g>
+  </a>
+
+  <g id="aggregate-storage">
+    <rect x="750" y="510" width="175" height="90" class="node node-accent"/>
+    <text x="837.5" y="538" text-anchor="middle" class="node-title">Aggregate store</text>
+    <text x="837.5" y="560" text-anchor="middle" class="node-text">S3 object data</text>
+    <text x="837.5" y="576" text-anchor="middle" class="node-text">Mongo metadata</text>
+    <text x="837.5" y="596" text-anchor="middle" class="small-text">durable aggregate catalog</text>
+  </g>
+
+  <g id="aggregate-announcements">
+    <rect x="970" y="510" width="140" height="90" class="node node-accent"/>
+    <text x="1040" y="538" text-anchor="middle" class="node-title">Aggregate</text>
+    <text x="1040" y="557" text-anchor="middle" class="node-title">announcements</text>
+    <text x="1040" y="581" text-anchor="middle" class="node-text">MQTT or NATS</text>
+    <text x="1040" y="596" text-anchor="middle" class="node-text">metadata notice</text>
+  </g>
+
+  <path d="M 258 356 C 258 455 330 475 405 510" class="flow flow-file"/>
+  <rect x="244" y="446" width="138" height="35" class="label-bg"/>
+  <text x="313" y="461" text-anchor="middle" class="flow-label">well-known qnames</text>
+  <text x="313" y="475" text-anchor="middle" class="flow-label">minute histograms</text>
+
+  <path d="M 500 555 L 550 555" class="flow flow-http"/>
+  <rect x="481" y="515" width="101" height="35" class="label-bg"/>
+  <text x="531.5" y="530" text-anchor="middle" class="flow-label">signed HTTP</text>
+  <text x="531.5" y="544" text-anchor="middle" class="flow-label">aggregate upload</text>
+
+  <path d="M 695 555 L 750 555" class="flow flow-neutral"/>
+  <rect x="696" y="580" width="72" height="20" class="label-bg"/>
+  <text x="732" y="594" text-anchor="middle" class="flow-label">store + index</text>
+
+  <path d="M 925 555 L 970 555" class="flow flow-nats"/>
+  <rect x="918" y="515" width="84" height="35" class="label-bg"/>
+  <text x="960" y="530" text-anchor="middle" class="flow-label">announce</text>
+  <text x="960" y="544" text-anchor="middle" class="flow-label">new file</text>
+
+  <!-- EDM side branch: local session files -->
+  <g id="session-parquet">
+    <rect x="78" y="595" width="205" height="98" class="node node-accent"/>
+    <text x="180.5" y="624" text-anchor="middle" class="node-title">Local session Parquet</text>
+    <text x="180.5" y="647" text-anchor="middle" class="node-text">non-well-known qnames</text>
+    <text x="180.5" y="663" text-anchor="middle" class="node-text">complete DNS messages</text>
+    <text x="180.5" y="679" text-anchor="middle" class="node-text">pseudonymised client IPs</text>
+  </g>
+  <path d="M 225 356 C 145 430 145 520 180 595" class="flow flow-file"/>
+  <rect x="70" y="504" width="145" height="35" class="label-bg"/>
+  <text x="142.5" y="519" text-anchor="middle" class="flow-label">local analysis only</text>
+  <text x="142.5" y="533" text-anchor="middle" class="flow-label">optional output</text>
+
+  <!-- POP detail -->
+  <g id="pop-detail">
+    <rect x="1312" y="430" width="210" height="105" class="callout"/>
+    <text x="1330" y="455" class="callout-title">POP policy merge</text>
+    <text x="1330" y="477" class="node-text">Core TAPIR observations</text>
+    <text x="1330" y="494" class="node-text">Local allow, deny, doubt lists</text>
+    <text x="1330" y="511" class="node-text">Compact resolver RPZ output</text>
+  </g>
+  <path d="M 1372 338 L 1372 430" class="flow flow-neutral"/>
+
+  <!-- Legend -->
+  <g id="legend">
+    <rect x="42" y="790" width="1516" height="112" class="callout"/>
+    <text x="66" y="818" class="legend-title">Legend</text>
+
+    <path d="M 66 846 L 126 846" class="flow flow-dnstap"/>
+    <text x="140" y="850" class="legend-text">DNSTAP from resolver to EDM</text>
+
+    <path d="M 345 846 L 405 846" class="flow flow-mqtt"/>
+    <text x="419" y="850" class="legend-text">MQTT, signed JWS payloads</text>
+
+    <path d="M 620 846 L 680 846" class="flow flow-nats"/>
+    <text x="694" y="850" class="legend-text">NATS subjects and KV updates</text>
+
+    <path d="M 930 846 L 990 846" class="flow flow-http"/>
+    <text x="1004" y="850" class="legend-text">HTTPS aggregate upload with HTTP message signatures</text>
+
+    <path d="M 66 875 L 126 875" class="flow flow-file"/>
+    <text x="140" y="879" class="legend-text">Local file or Parquet data movement</text>
+
+    <path d="M 345 875 L 405 875" class="flow flow-rpz"/>
+    <text x="419" y="879" class="legend-text">RPZ AXFR, IXFR, and DNS NOTIFY to resolver</text>
+
+    <path d="M 620 875 L 680 875" class="flow flow-neutral"/>
+    <text x="694" y="879" class="legend-text">Internal storage, indexing, or control handoff</text>
+  </g>
+</svg>
