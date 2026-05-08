@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schema.dnstapir.se/v1/core_observation",
+  "title": "DNS TAPIR CORE Observations",
+  "description": "Schema for DNS TAPIR CORE observations going from CORE to EDGE",
+  "type": "object",
+  "required": [
+    "src_name",
+    "creator",
+    "msg_type",
+    "list_type",
+    "added",
+    "removed",
+    "msg",
+    "timestamp",
+    "time_str"
+  ],
+  "properties": {
+    "message_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "src_name": {
+      "description": "The name of the intelligence source, must match config in POP",
+      "type": "string"
+    },
+    "creator": {
+      "description": "Who was responsible for creating the observation",
+      "type": "string"
+    },
+    "msg_type": {
+      "description": "What type of information is carried within this message",
+      "type": "string",
+      "enum": [
+        "observation"
+      ]
+    },
+    "list_type": {
+      "description": "What type of list this observation should be added to/removed from",
+      "type": "string",
+      "enum": [
+        "allowlist",
+        "doubtlist",
+        "denylist"
+      ]
+    },
+    "added": {
+      "description": "Observations about a domain that are to be added",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/observation"
+      }
+    },
+    "removed": {
+      "description": "Observations about a domain that are to be removed",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/observation"
+      }
+    },
+    "msg": {
+      "description": "An arbitrary text message for general purposes, such as debugging",
+      "type": "string"
+    },
+    "timestamp": {
+      "description": "A timestamp for when this message was received",
+      "type": "string",
+      "format": "date-time"
+    },
+    "time_str": {
+      "description": "Not used",
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "observation": {
+      "description": "An observation made about a domain",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The domain name for which the observation is valid",
+          "type": "string"
+        },
+        "time_added": {
+          "description": "The point in time when the observation was made",
+          "type": "string",
+          "format": "date-time"
+        },
+        "ttl": {
+          "description": "For how long the observation should be considered valid",
+          "type": "integer"
+        },
+        "tag_mask": {
+          "description": "Observations made about the domain, encoded as bits in a 32-bit word",
+          "type": "integer"
+        },
+        "extended_tags": {
+          "description": "Not used",
+          "type": "array"
+        }
+      }
+    }
+  }
+}

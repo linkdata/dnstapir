@@ -1,0 +1,98 @@
+{
+  "fixture_version": 1,
+  "description": "Offline DNS Tapir E2E fixture set: deterministic DNSTAP response frames only.",
+  "fixtures": [
+    {
+      "name": "well-known-example-a",
+      "qname": "example.com.",
+      "qtype": 1,
+      "qclass": 1,
+      "rcode": 0,
+      "client_ip": "192.0.2.10",
+      "resolver_ip": "192.0.2.53",
+      "client_port": 53010,
+      "resolver_port": 53,
+      "response_time": "2026-01-02T03:04:05Z",
+      "answers": [
+        {
+          "type": "A",
+          "name": "example.com.",
+          "value": "93.184.216.34",
+          "ttl": 60
+        }
+      ],
+      "expected": {
+        "session": false,
+        "histogram": true,
+        "new_qname": false,
+        "rpz": false
+      }
+    },
+    {
+      "name": "unknown-rpz-first",
+      "qname": "rpz-e2e-1.invalid.",
+      "qtype": 1,
+      "qclass": 1,
+      "rcode": 0,
+      "client_ip": "192.0.2.11",
+      "resolver_ip": "192.0.2.53",
+      "client_port": 53011,
+      "resolver_port": 53,
+      "response_time": "2026-01-02T03:04:06Z",
+      "answers": [
+        {
+          "type": "A",
+          "name": "rpz-e2e-1.invalid.",
+          "value": "198.51.100.10",
+          "ttl": 60
+        }
+      ],
+      "expected": {
+        "session": true,
+        "histogram": false,
+        "new_qname": true,
+        "rpz": true,
+        "rpz_action": "DROP",
+        "rpz_target": "rpz-drop."
+      }
+    },
+    {
+      "name": "unknown-rpz-repeat",
+      "qname": "rpz-e2e-1.invalid.",
+      "qtype": 1,
+      "qclass": 1,
+      "rcode": 0,
+      "client_ip": "192.0.2.12",
+      "resolver_ip": "192.0.2.53",
+      "client_port": 53012,
+      "resolver_port": 53,
+      "response_time": "2026-01-02T03:04:07Z",
+      "answers": [
+        {
+          "type": "A",
+          "name": "rpz-e2e-1.invalid.",
+          "value": "198.51.100.11",
+          "ttl": 60
+        }
+      ],
+      "expected": {
+        "session": true,
+        "histogram": false,
+        "new_qname": false,
+        "rpz": false
+      }
+    }
+  ],
+  "negative_mqtt": {
+    "topic": "events/up/e2e-edm/new_qname",
+    "payload": {
+      "type": "new_qname",
+      "version": 0,
+      "qname": "unsigned-rpz-e2e.invalid.",
+      "qtype": 1,
+      "qclass": 1,
+      "timestamp": "2026-01-02T03:04:08Z"
+    },
+    "must_not_reach_rpz": "unsigned-rpz-e2e.invalid."
+  }
+}

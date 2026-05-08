@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schema.dnstapir.se/v1/new_qname",
+  "type": "object",
+  "required": [
+    "type",
+    "version",
+    "qname"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "type": {
+      "const": "new_qname"
+    },
+    "version": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "message_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "qclass": {
+      "description": "Query Class",
+      "type": "integer",
+      "minimum": 0
+    },
+    "qname": {
+      "description": "Query Name",
+      "type": "string"
+    },
+    "qtype": {
+      "description": "Query Type",
+      "type": "integer",
+      "minimum": 0
+    },
+    "rdlength": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "flags": {
+      "description": "Flag Field (QR/Opcode/AA/TC/RD/TA/Z/RCODE)",
+      "type": "integer"
+    },
+    "initiator": {
+      "type": "string",
+      "enum": [
+        "client",
+        "resolver"
+      ]
+    }
+  }
+}

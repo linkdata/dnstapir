@@ -1,0 +1,188 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/dnstapir/tapir"
+	"github.com/miekg/dns"
+)
+
+type popArtifact struct {
+	Domain     string          `json:"domain"`
+	ListType   string          `json:"list_type"`
+	SourceName string          `json:"source_name"`
+	Action     string          `json:"action"`
+	RenderedRR string          `json:"rendered_rpz_rr"`
+	RPZRecords []popRPZRecord  `json:"rpz_records"`
+	Input      json.RawMessage `json:"input"`
+}
+
+type popRPZRecord struct {
+	Domain     string `json:"domain"`
+	Action     string `json:"action"`
+	RenderedRR string `json:"rendered_rpz_rr"`
+}
+
+func TestE2EPopArtifact(t *testing.T) {
+	obsPath := os.Getenv("E2E_POP_OBSERVATION")
+	if obsPath == "" {
+		t.Fatal("E2E_POP_OBSERVATION is required")
+	}
+	artifactPath := os.Getenv("E2E_POP_ARTIFACT")
+	if artifactPath == "" {
+		t.Fatal("E2E_POP_ARTIFACT is required")
+	}
+	forbidden := dns.Fqdn(os.Getenv("E2E_POP_FORBIDDEN_DOMAIN"))
+
+	body, err := os.ReadFile(obsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tm tapir.TapirMsg
+	if err := json.Unmarshal(body, &tm); err != nil {
+		t.Fatalf("unmarshal TapirMsg: %v\npayload: %s", err, body)
+	}
+	if tm.SrcName == "" {
+		t.Fatal("TapirMsg src_name is empty")
+	}
+	if tm.ListType == "" {
+		t.Fatal("TapirMsg list_type is empty")
+	}
+	for i := range tm.Added {
+		tm.Added[i].Name = dns.Fqdn(strings.ToLower(tm.Added[i].Name))
+	}
+	for i := range tm.Removed {
+		tm.Removed[i].Name = dns.Fqdn(strings.ToLower(tm.Removed[i].Name))
+	}
+
+	pd := newE2EPopData(tm.ListType, tm.SrcName)
+	changed, err := pd.ProcessTapirUpdate(tm)
+	if err != nil {
+		t.Fatalf("ProcessTapirUpdate: %v", err)
+	}
+	if !changed {
+		t.Fatal("ProcessTapirUpdate returned changed=false")
+	}
+
+	var records []popRPZRecord
+	for domain, rpzn := range pd.Rpz.Axfr.Data {
+		rendered := ""
+		if rpzn.RR != nil && *rpzn.RR != nil {
+			rendered = (*rpzn.RR).String()
+		}
+		records = append(records, popRPZRecord{
+			Domain:     domain,
+			Action:     tapir.ActionToString[rpzn.Action],
+			RenderedRR: rendered,
+		})
+	}
+
+	if forbidden != "." {
+		for _, rec := range records {
+			if rec.Domain == forbidden {
+				t.Fatalf("forbidden unsigned domain reached RPZ: %s", forbidden)
+			}
+		}
+	}
+
+	if len(tm.Added) == 0 {
+		t.Fatal("TapirMsg added array is empty")
+	}
+	target := dns.Fqdn(strings.ToLower(tm.Added[0].Name))
+	rpzn, ok := pd.Rpz.Axfr.Data[target]
+	if !ok {
+		t.Fatalf("RPZ artifact missing expected domain %s; records=%+v", target, records)
+	}
+	if rpzn.Action != tapir.DROP {
+		t.Fatalf("RPZ action for %s = %s, want DROP", target, tapir.ActionToString[rpzn.Action])
+	}
+	if rpzn.RR == nil || *rpzn.RR == nil {
+		t.Fatalf("RPZ record for %s has nil RR", target)
+	}
+	if !strings.Contains((*rpzn.RR).String(), "rpz-drop.") {
+		t.Fatalf("RPZ record for %s = %q, want rpz-drop target", target, (*rpzn.RR).String())
+	}
+
+	artifact := popArtifact{
+		Domain:     target,
+		ListType:   tm.ListType,
+		SourceName: tm.SrcName,
+		Action:     tapir.ActionToString[rpzn.Action],
+		RenderedRR: (*rpzn.RR).String(),
+		RPZRecords: records,
+		Input:      body,
+	}
+	out, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = append(out, '\n')
+	if err := os.WriteFile(artifactPath, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newE2EPopData(listType string, sourceName string) *PopData {
+	lg := log.New(io.Discard, "", 0)
+	lists := map[string]map[string]*tapir.WBGlist{
+		"allowlist": {},
+		"denylist":  {},
+		"doubtlist": {},
+	}
+	for _, lt := range []string{"allowlist", "denylist", "doubtlist"} {
+		lists[lt][sourceName] = &tapir.WBGlist{
+			Name:       sourceName,
+			Type:       lt,
+			Format:     "map",
+			Names:      map[string]tapir.TapirName{},
+			ReaperData: map[time.Time]map[string]bool{},
+		}
+	}
+	if _, ok := lists[listType][sourceName]; !ok {
+		panic(fmt.Sprintf("unsupported list/source %s/%s", listType, sourceName))
+	}
+	return &PopData{
+		Lists:             lists,
+		Logger:            lg,
+		MqttLogger:        lg,
+		Downstreams:       map[string]RpzDownstream{},
+		DownstreamSerials: map[string]uint32{},
+		ReaperInterval:    time.Minute,
+		DenylistedNames:   map[string]bool{},
+		DoubtlistedNames:  map[string]*tapir.TapirName{},
+		RpzSources:        map[string]*tapir.ZoneData{},
+		RpzRefreshCh:      make(chan RpzRefresh, 1),
+		RpzCommandCh:      make(chan RpzCmdData, 1),
+		TapirObservations: make(chan tapir.MqttPkgIn, 1),
+		TapirMqttPubCh:    make(chan tapir.MqttPkgOut, 1),
+		ComponentStatusCh: make(chan tapir.ComponentStatusUpdate, 1),
+		Policy: PopPolicy{
+			Logger:          lg,
+			AllowlistAction: tapir.ALLOWLIST,
+			DenylistAction:  tapir.DROP,
+			Doubtlist: DoubtlistPolicy{
+				NumSources:         1,
+				NumSourcesAction:   tapir.DROP,
+				NumTapirTags:       1,
+				NumTapirTagsAction: tapir.DROP,
+				DenyTapirTags:      tapir.NewName,
+				DenyTapirAction:    tapir.DROP,
+			},
+		},
+		Rpz: RpzData{
+			CurrentSerial: 1,
+			ZoneName:      "rpz.e2e.",
+			Axfr: RpzAxfr{
+				Serial: 1,
+				Data:   map[string]*tapir.RpzName{},
+			},
+		},
+	}
+}
