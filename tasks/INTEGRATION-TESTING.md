@@ -46,6 +46,15 @@ Known issues to research early:
 - POP/RPZ verification should avoid requiring a recursive resolver. Prefer
   direct inspection of generated RPZ state or POP outputs; use DNS protocol
   transfer checks only as an optional local compatibility layer.
+- A POP library refactor exists locally in `../dnstapir-pop`: root package
+  `pop` exposes `Run` and the existing policy/RPZ types. The E2E harness can
+  import this package directly via `E2E_POP_REPO` instead of copying POP source
+  into a temp test module.
+- The prototype harness is now driven from the repository root by
+  `go run ./cmd/e2e-test run`.
+- EDM has an opt-in manual parquet rotation path for E2E:
+  `--enable-manual-parquet-rotation` exposes localhost
+  `POST /debug/rotate-parquet` on the metrics server.
 
 ## Stage 1: EDM-Only CI Baseline
 
@@ -74,8 +83,10 @@ Assertions:
 - Session parquet appears under `parquet/sessions/` when session files are not
   disabled.
 - Histogram parquet appears under `parquet/histograms/outbox/` for well-known
-  names, either after the minute boundary or after graceful shutdown flush.
-- DuckDB can read both parquet families and verify expected row/count shape.
+  names after the harness requests manual rotation; natural minute-boundary
+  rotation remains an optional compatibility mode.
+- The harness parquet reader can read both parquet families and verify expected
+  row/count shape without requiring DuckDB.
 
 Acceptance criteria:
 
@@ -129,7 +140,8 @@ default CI path.
 
 Prototype path A, full component route:
 
-- Start Mosquitto, NATS with JetStream, `mqtt-bridge` upbound,
+- Start the embedded `e2e-test mqtt-broker`, NATS with JetStream,
+  `mqtt-bridge` upbound,
   `tapir-analyse-new-qname`, `observation-encoder`, `mqtt-bridge` downbound,
   and POP.
 - Configure EDM to publish signed `events/up/<kid>/new_qname`.
@@ -212,7 +224,7 @@ Acceptance criteria:
 - Keep generated keys, DAWGs, parquet, Pebble stores, and clone caches outside
   tracked source.
 - Use JSON output from `edm-loadgen benchmark` for machine assertions.
-- Use DuckDB or a small Go/Python parquet reader to inspect parquet contents.
+- Use the Go harness parquet reader to inspect parquet contents.
 - Inspect POP/RPZ output directly for default CI. If DNS protocol checks are
   needed, keep them optional, local-only, and non-recursive.
 

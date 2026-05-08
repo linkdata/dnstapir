@@ -19,9 +19,12 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	dnstap "github.com/dnstap/golang-dnstap"
@@ -31,6 +34,9 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jws"
 	"github.com/miekg/dns"
+	mochimqtt "github.com/mochi-mqtt/server/v2"
+	"github.com/mochi-mqtt/server/v2/hooks/auth"
+	"github.com/mochi-mqtt/server/v2/listeners"
 	"github.com/parquet-go/parquet-go"
 	"google.golang.org/protobuf/proto"
 )
@@ -159,15 +165,19 @@ type histogramRow struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatalf("usage: e2e-tools <keygen|inject|parquet-check|mqtt-capture|mqtt-publish|summarize> [flags]")
+		fatalf("usage: e2e-test <run|keygen|inject|mqtt-broker|parquet-check|mqtt-capture|mqtt-publish|summarize|supervise> [flags]")
 	}
 
 	var err error
 	switch os.Args[1] {
+	case "run":
+		err = runE2E(os.Args[2:])
 	case "keygen":
 		err = runKeygen(os.Args[2:])
 	case "inject":
 		err = runInject(os.Args[2:])
+	case "mqtt-broker":
+		err = runMQTTBroker(os.Args[2:])
 	case "parquet-check":
 		err = runParquetCheck(os.Args[2:])
 	case "mqtt-capture":
@@ -176,12 +186,71 @@ func main() {
 		err = runMQTTPublish(os.Args[2:])
 	case "summarize":
 		err = runSummarize(os.Args[2:])
+	case "supervise":
+		err = runSupervise(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown subcommand %q", os.Args[1])
 	}
 	if err != nil {
 		fatalf("%v", err)
 	}
+}
+
+func runSupervise(args []string) error {
+	if len(args) > 0 && args[0] == "--" {
+		args = args[1:]
+	}
+	if len(args) == 0 {
+		return errors.New("usage: e2e-test supervise -- <command> [args...]")
+	}
+
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	configureSupervisedCommand(cmd)
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	defer signal.Stop(signals)
+
+	select {
+	case sig := <-signals:
+		terminateProcessGroup(cmd.Process.Pid, 5*time.Second)
+		err := <-done
+		if err != nil {
+			return fmt.Errorf("supervised command exited after %s: %w", sig, err)
+		}
+		return nil
+	case err := <-done:
+		return err
+	}
+}
+
+func terminateProcessGroup(pid int, grace time.Duration) {
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil {
+		return
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(-pgid, 0); err != nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 }
 
 func runKeygen(args []string) error {
@@ -214,6 +283,39 @@ func runKeygen(args []string) error {
 	}
 	if err := createEd25519JWK(filepath.Join(*dir, "bridge-jws.json"), filepath.Join(*dir, "bridge-jws-public.json"), *bridgeKID); err != nil {
 		return err
+	}
+	return nil
+}
+
+func runMQTTBroker(args []string) error {
+	fs := flag.NewFlagSet("mqtt-broker", flag.ExitOnError)
+	addr := fs.String("addr", "127.0.0.1:28884", "MQTT listen address")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	server := mochimqtt.New(nil)
+	if err := server.AddHook(new(auth.AllowHook), nil); err != nil {
+		return err
+	}
+	if err := server.AddListener(listeners.NewTCP(listeners.Config{
+		ID:      "tcp",
+		Address: *addr,
+	})); err != nil {
+		return err
+	}
+
+	if err := server.Serve(); err != nil {
+		return err
+	}
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	defer signal.Stop(signals)
+
+	sig := <-signals
+	if err := server.Close(); err != nil {
+		return fmt.Errorf("closing MQTT broker after %s: %w", sig, err)
 	}
 	return nil
 }
