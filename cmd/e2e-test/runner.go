@@ -67,6 +67,63 @@ type startedProcess struct {
 	cmd  *exec.Cmd
 }
 
+type upstreamRepo struct {
+	name string
+	url  string
+}
+
+var allUpstreamRepos = []upstreamRepo{
+	{name: "edge-stack", url: "https://github.com/dnstapir/edge-stack.git"},
+	{name: "edm", url: "https://github.com/dnstapir/edm.git"},
+	{name: "unbound", url: "https://github.com/dnstapir/unbound.git"},
+	{name: "cli", url: "https://github.com/dnstapir/cli.git"},
+	{name: "edm-loadgen", url: "https://github.com/linkdata/edm-loadgen.git"},
+	{name: "pop", url: "https://github.com/dnstapir/pop.git"},
+	{name: "aggrec", url: "https://github.com/dnstapir/aggrec.git"},
+	{name: "mqtt-bridge", url: "https://github.com/dnstapir/mqtt-bridge.git"},
+	{name: "tapir-analyse-new-qname", url: "https://github.com/dnstapir/tapir-analyse-new-qname.git"},
+	{name: "observation-encoder", url: "https://github.com/dnstapir/observation-encoder.git"},
+	{name: "nodeman", url: "https://github.com/dnstapir/nodeman.git"},
+	{name: "evrec", url: "https://github.com/dnstapir/evrec.git"},
+}
+
+var requiredUpstreamRepoNames = []string{
+	"edm",
+	"cli",
+	"mqtt-bridge",
+	"tapir-analyse-new-qname",
+	"observation-encoder",
+	"pop",
+}
+
+func runPopulateUpstream(args []string) error {
+	fs := flag.NewFlagSet("populate-upstream", flag.ExitOnError)
+	rootFlag := fs.String("root", "", "repository root; defaults to auto-detection")
+	allFlag := fs.Bool("all", false, "clone every documented upstream research checkout, not only E2E-required repos")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	root := *rootFlag
+	var err error
+	if root == "" {
+		root, err = detectRepoRoot()
+		if err != nil {
+			return err
+		}
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+
+	repos := requiredUpstreamRepos()
+	if *allFlag {
+		repos = allUpstreamRepos
+	}
+	return populateUpstreamRepos(filepath.Join(root, "upstream"), repos, e2eLogf)
+}
+
 func runE2E(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	rootFlag := fs.String("root", "", "repository root; defaults to auto-detection")
@@ -110,6 +167,13 @@ func runE2E(args []string) error {
 			return err
 		}
 	}
+	popRepo := *popRepoFlag
+	if popRepo != "" {
+		popRepo, err = filepath.Abs(popRepo)
+		if err != nil {
+			return err
+		}
+	}
 
 	mqttPort := *mqttPortFlag
 	if mqttPort == 0 {
@@ -147,7 +211,7 @@ func runE2E(args []string) error {
 		edmKID:            defaultEDMKID,
 		bridgeKID:         defaultBridgeKID,
 		edmRepo:           edmRepo,
-		popRepo:           *popRepoFlag,
+		popRepo:           popRepo,
 	}
 
 	signals := make(chan os.Signal, 1)
@@ -168,7 +232,7 @@ func (r *e2eRunner) run() error {
 	if _, err := exec.LookPath("go"); err != nil {
 		return errors.New("missing required command: go")
 	}
-	if err := r.checkUpstreamRepos(); err != nil {
+	if err := r.ensureUpstreamRepos(); err != nil {
 		return err
 	}
 	if err := r.resetWorkdir(); err != nil {
@@ -260,17 +324,30 @@ func (r *e2eRunner) run() error {
 	return err
 }
 
-func (r *e2eRunner) checkUpstreamRepos() error {
-	if path := r.resolveEDMRepo(); !dirExists(path) {
-		return fmt.Errorf("missing EDM checkout: %s", path)
+func (r *e2eRunner) ensureUpstreamRepos() error {
+	if r.edmRepo != "" && !dirExists(r.edmRepo) {
+		return fmt.Errorf("missing EDM checkout: %s", r.edmRepo)
 	}
-	for _, repo := range []string{"cli", "mqtt-bridge", "tapir-analyse-new-qname", "observation-encoder"} {
-		path := filepath.Join(r.paths.upstream, repo)
-		if !dirExists(path) {
-			return fmt.Errorf("missing upstream checkout: %s", path)
+	if r.popRepo != "" && !dirExists(r.popRepo) {
+		return fmt.Errorf("missing POP checkout: %s", r.popRepo)
+	}
+
+	var missing []upstreamRepo
+	for _, repo := range requiredUpstreamRepos() {
+		if repo.name == "edm" && r.edmRepo != "" {
+			continue
+		}
+		if repo.name == "pop" && r.popRepo != "" {
+			continue
+		}
+		if repo.name == "pop" && dirExists(filepath.Join(r.paths.root, "..", "dnstapir-pop")) {
+			continue
+		}
+		if !dirExists(filepath.Join(r.paths.upstream, repo.name)) {
+			missing = append(missing, repo)
 		}
 	}
-	return nil
+	return populateUpstreamRepos(r.paths.upstream, missing, r.logf)
 }
 
 func (r *e2eRunner) resetWorkdir() error {
@@ -733,7 +810,59 @@ func (r *e2eRunner) goEnv(extra ...string) []string {
 }
 
 func (r *e2eRunner) logf(format string, args ...any) {
+	e2eLogf(format, args...)
+}
+
+func e2eLogf(format string, args ...any) {
 	fmt.Fprintf(os.Stdout, "[e2e] "+format+"\n", args...)
+}
+
+func requiredUpstreamRepos() []upstreamRepo {
+	repos := make([]upstreamRepo, 0, len(requiredUpstreamRepoNames))
+	for _, name := range requiredUpstreamRepoNames {
+		if repo, ok := upstreamRepoByName(name); ok {
+			repos = append(repos, repo)
+		}
+	}
+	return repos
+}
+
+func upstreamRepoByName(name string) (upstreamRepo, bool) {
+	for _, repo := range allUpstreamRepos {
+		if repo.name == name {
+			return repo, true
+		}
+	}
+	return upstreamRepo{}, false
+}
+
+func populateUpstreamRepos(upstreamDir string, repos []upstreamRepo, logf func(string, ...any)) error {
+	if len(repos) == 0 {
+		return nil
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		return errors.New("missing required command: git")
+	}
+	if err := os.MkdirAll(upstreamDir, 0o755); err != nil {
+		return err
+	}
+	for _, repo := range repos {
+		dst := filepath.Join(upstreamDir, repo.name)
+		if dirExists(dst) {
+			continue
+		}
+		if fileExists(dst) {
+			return fmt.Errorf("upstream path exists and is not a directory: %s", dst)
+		}
+		logf("cloning %s into %s", repo.url, dst)
+		cmd := exec.Command("git", "clone", repo.url, dst)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("git clone %s %s: %w", repo.url, dst, err)
+		}
+	}
+	return nil
 }
 
 func detectRepoRoot() (string, error) {

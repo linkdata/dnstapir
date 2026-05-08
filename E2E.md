@@ -28,6 +28,16 @@ Without this override, the runner builds `upstream/edm`.
 The runner auto-detects the repository root when it is launched from anywhere
 inside this checkout; pass `--root` only when running it from elsewhere.
 
+When the default `upstream/` checkouts needed by the harness are missing,
+`run` clones them automatically. To do that step explicitly:
+
+```bash
+go run ./cmd/e2e-test populate-upstream
+```
+
+This populates the E2E-required repos. Add `--all` to clone every documented
+upstream research checkout under `upstream/`.
+
 Runtime constraints:
 
 - No Unbound or recursive resolver is started.
@@ -46,7 +56,7 @@ Runtime constraints:
 Host prerequisites:
 
 - `go`
-- ignored upstream checkouts under `/upstream/`
+- `git` when `upstream/` needs to be populated
 
 The Go runner is intended to work on Linux and macOS.
 

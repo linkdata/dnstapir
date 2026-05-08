@@ -165,13 +165,15 @@ type histogramRow struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatalf("usage: e2e-test <run|keygen|inject|mqtt-broker|parquet-check|mqtt-capture|mqtt-publish|summarize|supervise> [flags]")
+		fatalf("usage: e2e-test <run|populate-upstream|keygen|inject|mqtt-broker|parquet-check|mqtt-capture|mqtt-publish|summarize|supervise> [flags]")
 	}
 
 	var err error
 	switch os.Args[1] {
 	case "run":
 		err = runE2E(os.Args[2:])
+	case "populate-upstream":
+		err = runPopulateUpstream(os.Args[2:])
 	case "keygen":
 		err = runKeygen(os.Args[2:])
 	case "inject":
