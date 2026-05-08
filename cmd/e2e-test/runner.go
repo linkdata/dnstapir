@@ -54,6 +54,7 @@ type e2eRunner struct {
 	natsURL           string
 	edmKID            string
 	bridgeKID         string
+	edmRepo           string
 	popRepo           string
 
 	mu          sync.Mutex
@@ -70,6 +71,7 @@ func runE2E(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	rootFlag := fs.String("root", "", "repository root; defaults to auto-detection")
 	workFlag := fs.String("workdir", os.Getenv("E2E_WORKDIR"), "work directory")
+	edmRepoFlag := fs.String("edm-repo", os.Getenv("E2E_EDM_REPO"), "EDM checkout to build; defaults to upstream/edm")
 	popRepoFlag := fs.String("pop-repo", os.Getenv("E2E_POP_REPO"), "POP checkout to use for direct RPZ verification")
 	natsBinFlag := fs.String("nats-server", os.Getenv("E2E_NATS_SERVER"), "nats-server binary")
 	natsVersionFlag := fs.String("nats-server-version", getenvDefault("E2E_NATS_SERVER_VERSION", defaultNATSServerVersion), "nats-server version to install when needed")
@@ -100,6 +102,13 @@ func runE2E(args []string) error {
 	work, err = filepath.Abs(work)
 	if err != nil {
 		return err
+	}
+	edmRepo := *edmRepoFlag
+	if edmRepo != "" {
+		edmRepo, err = filepath.Abs(edmRepo)
+		if err != nil {
+			return err
+		}
 	}
 
 	mqttPort := *mqttPortFlag
@@ -137,6 +146,7 @@ func runE2E(args []string) error {
 		natsURL:           fmt.Sprintf("nats://127.0.0.1:%d", *natsPortFlag),
 		edmKID:            defaultEDMKID,
 		bridgeKID:         defaultBridgeKID,
+		edmRepo:           edmRepo,
 		popRepo:           *popRepoFlag,
 	}
 
@@ -251,9 +261,12 @@ func (r *e2eRunner) run() error {
 }
 
 func (r *e2eRunner) checkUpstreamRepos() error {
-	for _, repo := range []string{"edm", "cli", "mqtt-bridge", "tapir-analyse-new-qname", "observation-encoder"} {
+	if path := r.resolveEDMRepo(); !dirExists(path) {
+		return fmt.Errorf("missing EDM checkout: %s", path)
+	}
+	for _, repo := range []string{"cli", "mqtt-bridge", "tapir-analyse-new-qname", "observation-encoder"} {
 		path := filepath.Join(r.paths.upstream, repo)
-		if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		if !dirExists(path) {
 			return fmt.Errorf("missing upstream checkout: %s", path)
 		}
 	}
@@ -308,7 +321,7 @@ func (r *e2eRunner) buildBinaries() error {
 		pkg  string
 	}{
 		{"e2e-test", r.paths.root, "./cmd/e2e-test"},
-		{"dnstapir-edm", filepath.Join(r.paths.upstream, "edm"), "./cmd/dnstapir-edm"},
+		{"dnstapir-edm", r.resolveEDMRepo(), "./cmd/dnstapir-edm"},
 		{"dnstapir-cli", filepath.Join(r.paths.upstream, "cli"), "."},
 		{"mqtt-bridge", filepath.Join(r.paths.upstream, "mqtt-bridge"), "./cmd/mqtt-bridge"},
 		{"tapir-analyse-new-qname", filepath.Join(r.paths.upstream, "tapir-analyse-new-qname"), "./cmd/tapir-analyse-new-qname"},
@@ -339,7 +352,7 @@ func (r *e2eRunner) requireEDMManualRotationSupport() error {
 		return err
 	}
 	if !strings.Contains(string(out), "--enable-manual-parquet-rotation") {
-		return errors.New("EDM binary does not support --enable-manual-parquet-rotation; update upstream/edm or run with --manual-parquet-rotation=false to use minute-boundary rotation")
+		return errors.New("EDM binary does not support --enable-manual-parquet-rotation; use --edm-repo $HOME/Proj/edm or run with --manual-parquet-rotation=false to use minute-boundary rotation")
 	}
 	return nil
 }
@@ -513,6 +526,13 @@ func (r *e2eRunner) resolvePopRepo() string {
 		return sibling
 	}
 	return filepath.Join(r.paths.upstream, "pop")
+}
+
+func (r *e2eRunner) resolveEDMRepo() string {
+	if r.edmRepo != "" {
+		return r.edmRepo
+	}
+	return filepath.Join(r.paths.upstream, "edm")
 }
 
 func (r *e2eRunner) popPackageName(repo string) (string, error) {
@@ -832,6 +852,11 @@ func copyFile(src, dst string) error {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 func isExecutable(path string) bool {

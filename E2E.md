@@ -14,6 +14,17 @@ The default command is:
 go run ./cmd/e2e-test run
 ```
 
+Until `--enable-manual-parquet-rotation` is in the standard upstream EDM
+checkout used here, run against the local EDM fork that carries the required
+feature:
+
+```bash
+go run ./cmd/e2e-test run --edm-repo "$HOME/Proj/edm"
+```
+
+The same override can be supplied as `E2E_EDM_REPO=$HOME/Proj/edm`.
+Without this override, the runner builds `upstream/edm`.
+
 The runner auto-detects the repository root when it is launched from anywhere
 inside this checkout; pass `--root` only when running it from elsewhere.
 
@@ -44,7 +55,8 @@ The runner uses `E2E_NATS_SERVER` when set, otherwise reuses
 it installs the pinned version into `.e2e-work/tools`.
 
 The default immediate parquet path requires an EDM build that supports
-`--enable-manual-parquet-rotation`.
+`--enable-manual-parquet-rotation`; the local fork at `$HOME/Proj/edm`
+has this feature on its `main` branch.
 
 POP RPZ verification uses a direct test driver. Set `E2E_POP_REPO` to choose a
 POP checkout explicitly. If it is unset, the runner prefers a sibling
