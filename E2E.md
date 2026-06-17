@@ -14,7 +14,7 @@ The default command is:
 go run ./cmd/e2e-test run
 ```
 
-Until `--enable-manual-parquet-rotation` is in the standard upstream EDM
+Until `-enable-manual-parquet-rotation` is in the standard upstream EDM
 checkout used here, run against the local EDM fork that carries the required
 feature:
 
@@ -48,7 +48,7 @@ Runtime constraints:
   smoke path.
 - Generated keys, configs, DAWGs, logs, broker state, NATS state, and parquet
   files live under `/.e2e-work/`.
-- By default the runner starts EDM with `--enable-manual-parquet-rotation` and
+- By default the runner starts EDM with `-enable-manual-parquet-rotation` and
   posts to `http://127.0.0.1:2112/debug/rotate-parquet` after fixture
   injection, so parquet assertions do not wait for the natural minute boundary.
   Use `--manual-parquet-rotation=false` to exercise the natural rotation path.
@@ -65,7 +65,7 @@ The runner uses `E2E_NATS_SERVER` when set, otherwise reuses
 it installs the pinned version into `.e2e-work/tools`.
 
 The default immediate parquet path requires an EDM build that supports
-`--enable-manual-parquet-rotation`; the local fork at `$HOME/Proj/edm`
+`-enable-manual-parquet-rotation`; the local fork at `$HOME/Proj/edm`
 has this feature on its `main` branch.
 
 POP RPZ verification uses a direct test driver. Set `E2E_POP_REPO` to choose a

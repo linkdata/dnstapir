@@ -428,8 +428,8 @@ func (r *e2eRunner) requireEDMManualRotationSupport() error {
 	if err != nil {
 		return err
 	}
-	if !strings.Contains(string(out), "--enable-manual-parquet-rotation") {
-		return errors.New("EDM binary does not support --enable-manual-parquet-rotation; use --edm-repo $HOME/Proj/edm or run with --manual-parquet-rotation=false to use minute-boundary rotation")
+	if !strings.Contains(string(out), "-enable-manual-parquet-rotation") {
+		return errors.New("EDM binary does not support -enable-manual-parquet-rotation; use --edm-repo $HOME/Proj/edm or run with --manual-parquet-rotation=false to use minute-boundary rotation")
 	}
 	return nil
 }

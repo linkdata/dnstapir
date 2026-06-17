@@ -53,7 +53,7 @@ Known issues to research early:
 - The prototype harness is now driven from the repository root by
   `go run ./cmd/e2e-test run`.
 - EDM has an opt-in manual parquet rotation path for E2E:
-  `--enable-manual-parquet-rotation` exposes localhost
+  `-enable-manual-parquet-rotation` exposes localhost
   `POST /debug/rotate-parquet` on the metrics server.
 - Until that EDM feature is present in the standard upstream checkout, run the
   harness with the local fork that has it:
