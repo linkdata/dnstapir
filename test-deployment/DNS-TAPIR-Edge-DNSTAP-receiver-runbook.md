@@ -1885,6 +1885,11 @@ docker compose --file "$TAPIR_EDGE_COMPOSE" \
 Renewal creates a new X.509 private key and certificate but preserves
 `data.json`, so Core continues to find the same signing identity in NodeMan.
 
+This procedure covers EDM. POP is a separate enrolment with its own certificate,
+in `pop/keys`, which has to be copied into `pop/etc/certs` and POP restarted.
+Section 14.4 does both identities on a timer and is the better answer than
+remembering to run this.
+
 The log assertions above count matches with `grep -c ... >/dev/null` rather than
 short-circuiting with `grep -q`, as does every other pipeline-terminating check
 in both runbooks. Section 12.5 of the Core runbook explains why: under
@@ -1895,6 +1900,58 @@ in both runbooks. Section 12.5 of the Core runbook explains why: under
 
 Use Section 13 of the Core runbook. Its complete start command orders NATS and
 analysis services before MongoDB, NodeMan, Mosquitto, and `mqtt-bridge`.
+
+### 14.4 Automated maintenance
+
+Sections 14.1 and 14.2 are what to do when you are already looking. This is what
+runs when nobody is.
+
+`dnstapir-maintenance.sh` covers the Edge's periodic work. Run it by hand first,
+then install it as a systemd user timer — no root, because the service account
+already has lingering:
+
+```bash
+./dnstapir-maintenance.sh --dry-run
+./dnstapir-maintenance.sh
+./dnstapir-maintenance.sh --install --on-calendar hourly
+```
+
+Hourly rather than daily, because the round-trip check below is the deployment's
+only detector of a silent break and an hour is a reasonable time to notice one.
+Nothing else in the run does work unless it is needed.
+
+**Certificates.** NodeMan issues 60-day certificates here where a deployment
+issues 15 and renews them automatically; the longer life is the only thing that
+makes the manual procedure in Section 14.2 survivable. The script renews either
+identity — EDM's and POP's are separate enrolments — when fewer than 21 days
+remain, using the same call Section 14.2 makes.
+
+Renewing and applying are separate steps, and the script does the second one
+every run rather than only after a renewal. A renewal interrupted before its
+restart leaves the file on disk looking correct while the service keeps running
+on the old certificate, and nothing reveals that until it expires. So the script
+compares what each service is actually using against what was enrolled: EDM's
+copy lives in the `edm-credentials` volume that `edm-init` fills, POP's in
+`pop/etc/certs` under the names its compiled-in configuration expects.
+
+**Logs and disk.** POP runs in debug mode and rotates nothing. Its log grows with
+the observation rate — several megabytes in the first minutes on a busy resolver
+— on a host that has the least free disk of the three. The script rotates any
+POP log past 64 MiB, keeping four compressed generations, and restarts POP so it
+reopens them; POP holds each file open, so truncating underneath it is not an
+option. EDM's `sent/` directory keeps every uploaded histogram, one a minute, and
+is pruned past a week. The `outbox` is never pruned: a file still there has not
+been accepted by the Aggregate Receiver, and more than a handful means uploads
+are failing.
+
+**The round trip.** The check that matters. It injects a name under
+`from-edge.looptest.dnstapir.se` through the DNSTAP listener and waits for it to
+appear in POP's list, which exercises every hop: EDM, Mosquitto, the bridge,
+NATS, the looptest analyst, the encoder, the bridge again, POP. A component that
+is up but no longer doing its job fails here and nowhere else.
+
+It needs the sender built in Section 13.2, and `--install` refuses to write a
+timer without it rather than installing a check that would quietly skip itself.
 
 ## 15. Cleanup
 

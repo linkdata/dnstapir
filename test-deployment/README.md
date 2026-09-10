@@ -46,6 +46,9 @@ observation buckets rather than trusting its own configuration.
   Idempotent; `--dry-run` shows what it would do.
 - `dnstapir-services-install.sh` — the services VM runbook, sections 3 to 10, as
   one script. Delegates the privileged half to the bootstrap script.
+- `dnstapir-maintenance.sh` — the periodic upkeep, for all three hosts. It picks
+  its role from the login environment the bootstrap wrote, and `--install` adds
+  a systemd user timer. See **Maintenance** below.
 
 Everything after the bootstrap runs as an unprivileged `dnstapir` account with
 Rootless Docker. That account has no `sudo` and is not in the `docker` group.
@@ -103,6 +106,53 @@ Not yet exercised, and worth knowing before you rely on it:
   been exercised end to end; section 9 is a separate throwaway harness.
 - Both firewall sections, and the Edge's Unbound configuration.
 
+## Maintenance
+
+Both halves of staying up are covered. Rootless Docker starts at boot through
+systemd lingering and every service declares `restart: unless-stopped`, so the
+deployment returns from a reboot on its own — verified. What that does not cover
+is a container that stays up and stops working, a certificate that expires, or a
+disk that fills, and `dnstapir-maintenance.sh` is the rest.
+
+Run it once by hand, then install the timer. It needs no root:
+
+```bash
+./dnstapir-maintenance.sh --dry-run
+./dnstapir-maintenance.sh
+./dnstapir-maintenance.sh --install --on-calendar hourly   # daily on services
+```
+
+It reports on every run and exits non-zero when a check fails, so a bad run
+shows up in `systemctl --user list-units --failed`.
+
+| Host | What it does |
+|---|---|
+| Edge | Renews the EDM and POP certificates, and applies an already-renewed one the service has not picked up. Rotates POP's logs, prunes uploaded histograms. Injects a looptest name and waits for it to reach POP. |
+| Core | Checks the broker certificates, the observation bucket lifetimes, discarded MQTT messages, and unhealthy containers. |
+| Services | Runs the section 11 backup and keeps seven generations, prunes stored aggregates, checks the CA and that UFW is active. |
+
+The Edge round trip is the check worth having. It exercises every hop — EDM,
+Mosquitto, the bridge, NATS, the looptest analyst, the encoder, the bridge again,
+POP — and it is the only one that catches a component that is running but no
+longer doing its job. That failure is not hypothetical: an `mqtt-bridge` holding
+a stale validation key stays up, stays connected, and discards everything
+(`mqtt-bridge#121`).
+
+What it still does not do:
+
+- **Copy backups off the services VM.** It writes and rotates them; nothing here
+  can guess a destination it is allowed to write to. A backup on the host it
+  protects is not a backup.
+- **Rehearse a restore.** Untested, and the CA cannot be recreated.
+- **Alert.** Failures land in the journal and in `list-units --failed`. Nothing
+  sends them anywhere.
+- **Update anything.** Every component is built from a clone and stays at the
+  commit it was built from, while a deployment tracks `:latest` for the
+  analysts, the bridge and Mosquitto. Nothing re-pulls or rebuilds. Pair any
+  automatic rebuild with the round-trip check before trusting it.
+- **Rotate secrets.** Generated once, changed by hand. A deployment refreshes
+  them hourly from a secret manager.
+
 ## Conventions
 
 - Every command block is meant to stand alone in a fresh shell. A block that
@@ -130,7 +180,6 @@ uses 15 with automatic renewal. Observation TTLs and the well-known-domains
 filter *have* been aligned with deployed values, because leaving them at the
 fixture's made the system behave qualitatively differently.
 
-Nothing here maintains itself. A deployment renews certificates, rotates logs,
-prunes stored aggregates, backs up on a schedule and alerts when a component
-stops; this does none of that, so it needs an operator's attention roughly
-monthly and will fill the Edge disk before that if the resolver is busy.
+A deployment also renews certificates, restarts what stops answering, and caps
+what it stores. `dnstapir-maintenance.sh` covers those; **Maintenance** below
+says what it does and does not reach.
