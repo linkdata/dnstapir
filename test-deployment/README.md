@@ -31,6 +31,12 @@ identities, enrolled signing keys or analysis state. That is the property worth
 protecting: a rebuilt Core does not disturb a running Edge, because the CA
 arrives from the bundle and the Edge's signing key never left the services VM.
 
+It cuts both ways. A rebuilt *Edge* cannot reclaim its old node name — names are
+single-use by design and the records survive on the services VM — so a reinstall
+enrols under a new one. Anything the services VM already created also keeps the
+shape it was created with, which is why Core section 11 reconciles the
+observation buckets rather than trusting its own configuration.
+
 ## Scripts
 
 - `dnstapir-host-bootstrap.sh` — every step that needs root, shared by all three
@@ -72,16 +78,22 @@ Do not expose any of this to the Internet or point it at real DNS data.
 
 ## Validation status
 
-The Core and Edge runbooks have been run end to end against real VMs, twice,
-including a full wipe and reinstall and a reboot of all three hosts. Commands
-are extracted from the runbooks programmatically rather than retyped, so what
-passed is what is written here.
+The Core and Edge runbooks have been run end to end against real VMs three
+times, including two full wipe-and-reinstall cycles and a reboot of all three
+hosts. Commands are extracted from the runbooks programmatically rather than
+retyped, so what passed is what is written here. The most recent run rebuilt
+Core and Edge from nothing against a services VM that was left running, and
+closed the looptest round trip: a synthetic DNSTAP response reached POP's list
+as a `tag_mask` of 1024 with the deployed lifetime.
+
+Services runbook sections 6, 8 and 10 have now been run as written, on a host
+that already held state, which is the case they exist for.
 
 Not yet exercised, and worth knowing before you rely on it:
 
-- The services runbook has never been run **as written** — only
-  `dnstapir-services-install.sh`, which implements it. Its CA and signing-key
-  steps have been exercised directly.
+- Services runbook sections 3 to 5 and 7 as written — the host bootstrap,
+  service-account entry and configuration authoring. Those are the parts
+  `dnstapir-services-install.sh` has covered instead.
 - The backup and restore procedure in services runbook section 11. An untested
   restore is not a backup, and the CA cannot be recreated.
 - The privileged bootstrap on a genuinely fresh host since the runbooks last
@@ -100,6 +112,9 @@ Not yet exercised, and worth knowing before you rely on it:
   `grep -q`. Under `set -o pipefail` an early-exiting `grep -q` kills its
   producer with `SIGPIPE`, and `pipefail` reports that as a failure of the whole
   pipeline even though the pattern matched.
+- Every `docker compose exec -T` reads from `/dev/null`. Without it the command
+  inherits the shell's standard input and consumes the rest of the pasted block,
+  so the commands after it are silently skipped and the block still exits `0`.
 - Validation sections clean up after themselves with exit traps and never delete
   a volume belonging to another section.
 
@@ -114,3 +129,8 @@ feed and therefore emits `registry_investigation` rather than
 uses 15 with automatic renewal. Observation TTLs and the well-known-domains
 filter *have* been aligned with deployed values, because leaving them at the
 fixture's made the system behave qualitatively differently.
+
+Nothing here maintains itself. A deployment renews certificates, rotates logs,
+prunes stored aggregates, backs up on a schedule and alerts when a component
+stops; this does none of that, so it needs an operator's attention roughly
+monthly and will fill the Edge disk before that if the resolver is busy.

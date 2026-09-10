@@ -521,7 +521,7 @@ compose exec -T \
           print("created " + w.user + "@" + w.db);
         }
       }
-    '
+    ' < /dev/null
 
 step "verification"
 
@@ -539,14 +539,14 @@ curl -fsS http://127.0.0.1:8222/varz | jq -e '.auth_required == true' >/dev/null
 compose exec -T mongo mongosh --quiet \
   --username nodeman --password "$TAPIR_MONGO_NODEMAN_PASSWORD" \
   --authenticationDatabase nodeman \
-  --eval 'db.getSiblingDB("nodeman").stats().db' \
+  --eval 'db.getSiblingDB("nodeman").stats().db' < /dev/null \
   || { echo "the nodeman MongoDB user cannot reach its database" >&2; exit 1; }
 
 # ... and must not be able to reach the other one.
 if compose exec -T mongo mongosh --quiet \
   --username nodeman --password "$TAPIR_MONGO_NODEMAN_PASSWORD" \
   --authenticationDatabase nodeman \
-  --eval 'db.getSiblingDB("aggregates").stats().db' >/dev/null 2>&1; then
+  --eval 'db.getSiblingDB("aggregates").stats().db' </dev/null >/dev/null 2>&1; then
   echo "the nodeman user can read the aggregates database; roles were not applied" >&2
   exit 1
 fi

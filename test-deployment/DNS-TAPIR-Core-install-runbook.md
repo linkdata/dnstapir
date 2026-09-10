@@ -571,7 +571,7 @@ docker compose --file "$TAPIR_CORE_COMPOSE_FILE" up -d nats
 
 for attempt in $(seq 1 30); do
   if docker compose --file "$TAPIR_CORE_COMPOSE_FILE" exec -T nats \
-    busybox wget -qO- http://127.0.0.1:8222/healthz \
+    busybox wget -qO- http://127.0.0.1:8222/healthz < /dev/null \
     | grep -c ok >/dev/null; then
     break
   fi
@@ -579,7 +579,7 @@ for attempt in $(seq 1 30); do
 done
 
 docker compose --file "$TAPIR_CORE_COMPOSE_FILE" exec -T nats \
-  busybox wget -qO- http://127.0.0.1:8222/healthz \
+  busybox wget -qO- http://127.0.0.1:8222/healthz < /dev/null \
   | grep -c ok >/dev/null
 
 docker compose --file "$TAPIR_CORE_COMPOSE_FILE" \
@@ -829,14 +829,14 @@ fi
 docker compose --file "$TAPIR_NODEMAN_COMPOSE_FILE" up -d mongo
 for attempt in $(seq 1 30); do
   if docker compose --file "$TAPIR_NODEMAN_COMPOSE_FILE" exec -T mongo \
-    mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' \
+    mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' < /dev/null \
     | grep -cx 1 >/dev/null; then
     break
   fi
   sleep 1
 done
 docker compose --file "$TAPIR_NODEMAN_COMPOSE_FILE" exec -T mongo \
-  mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' \
+  mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' < /dev/null \
   | grep -cx 1 >/dev/null
 
 nohup env NODEMAN_CONFIG="$TAPIR_NODEMAN_CONFIG" \
@@ -1108,14 +1108,14 @@ docker compose --file "$TAPIR_AGGREC_COMPOSE_FILE" \
 
 for attempt in $(seq 1 30); do
   if docker compose --file "$TAPIR_AGGREC_COMPOSE_FILE" exec -T mongo \
-    mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' \
+    mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' < /dev/null \
     | grep -cx 1 >/dev/null; then
     break
   fi
   sleep 1
 done
 docker compose --file "$TAPIR_AGGREC_COMPOSE_FILE" exec -T mongo \
-  mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' \
+  mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' < /dev/null \
   | grep -cx 1 >/dev/null
 
 for attempt in $(seq 1 30); do
@@ -1186,7 +1186,7 @@ openssl rand 1024 > "$TAPIR_ED25519_PAYLOAD"
   "$TAPIR_ED25519_PAYLOAD"
 
 docker compose --file "$TAPIR_AGGREC_COMPOSE_FILE" exec -T mongo \
-  mongosh --quiet aggregates --eval 'db.getCollectionNames()'
+  mongosh --quiet aggregates --eval 'db.getCollectionNames()' < /dev/null
 
 env \
   TAPIR_S3_ENDPOINT_URL="$TAPIR_S3_ENDPOINT_URL" \
@@ -1571,6 +1571,13 @@ to twenty seconds so that a `pytest` run finishes quickly; a deployed Core uses
 processor's lists empty themselves within seconds of being filled, which looks
 like a fault and is not how the system behaves in practice.
 
+Changing the configuration is not enough on its own. The lifetime that reaches a
+policy processor comes from the JetStream bucket, not from the file: the encoder
+applies `ttl` when it *creates* a bucket and leaves an existing one as it is. The
+buckets are on the services VM, so a Core rebuilt after a TTL change would keep
+publishing the old lifetime, silently and indefinitely. The block below
+reconciles the two before starting the stack, and asserts the result afterwards.
+
 ```bash
 (
 set -euo pipefail
@@ -1689,10 +1696,55 @@ chmod 0600 "$TAPIR_CORE_ANALYSIS_COMPOSE"
 
 docker compose --file "$TAPIR_CORE_ANALYSIS_COMPOSE" config >/dev/null
 
+# The observation buckets live on the services VM, so they outlive a Core
+# rebuild. Observation Encoder honours the configured ttl when it creates a
+# bucket and leaves an existing one alone, so a bucket first created by an
+# earlier Core keeps the maximum age it was made with and the ttl above never
+# takes effect. Delete the ones that disagree and let the encoder remake them.
+#
+# Only these three, and only when the age differs. They hold at most one ttl of
+# transient observations; seen_domains is the bucket with the accumulated state
+# and is never touched here.
+tapir_nats() {
+  docker run --rm natsio/nats-box:latest \
+    nats --server "$TAPIR_SERVICES_NATS_ENCODER_URL" "$@"
+}
+
+TAPIR_BUCKETS_RESET=0
+for TAPIR_BUCKET in \
+  globally_new_bucket \
+  looptest_bucket \
+  registry_investigation_bucket
+do
+  # "|| true" because nats exits non-zero on a bucket that does not exist, and
+  # under set -e that would end the block before the branch below can react.
+  TAPIR_BUCKET_AGE="$(tapir_nats stream info "KV_$TAPIR_BUCKET" --json 2>/dev/null \
+    | jq -r '.config.max_age // empty' || true)"
+  if [ -z "$TAPIR_BUCKET_AGE" ]; then
+    printf '%s does not exist\n' "$TAPIR_BUCKET"
+    TAPIR_BUCKETS_RESET=1
+  elif [ "$TAPIR_BUCKET_AGE" -ne "$((TAPIR_OBSERVATION_TTL * 1000000000))" ]; then
+    printf '%s has max age %ss, recreating for %ss\n' \
+      "$TAPIR_BUCKET" "$((TAPIR_BUCKET_AGE / 1000000000))" "$TAPIR_OBSERVATION_TTL"
+    tapir_nats kv del --force "$TAPIR_BUCKET"
+    TAPIR_BUCKETS_RESET=1
+  fi
+done
+
 # Observation Encoder creates the KV buckets the analysts expect, so it starts
 # first. Starting everything at once can leave an analyst waiting for a bucket
 # that does not exist yet.
-docker compose --file "$TAPIR_CORE_ANALYSIS_COMPOSE" up -d observation-encoder
+#
+# A bucket is only ever created at encoder startup, so an already-running
+# encoder would leave a missing or just-deleted bucket missing. Recreate it
+# whenever a bucket is not already right; "up -d" alone is a no-op on a running
+# container, and --force-recreate simply creates one that does not exist yet.
+if [ "$TAPIR_BUCKETS_RESET" -eq 1 ]; then
+  docker compose --file "$TAPIR_CORE_ANALYSIS_COMPOSE" \
+    up -d --force-recreate observation-encoder
+else
+  docker compose --file "$TAPIR_CORE_ANALYSIS_COMPOSE" up -d observation-encoder
+fi
 sleep 5
 test -n "$(docker compose --file "$TAPIR_CORE_ANALYSIS_COMPOSE" \
   ps --status running -q observation-encoder)"
@@ -1715,6 +1767,21 @@ done
 
 docker compose --file "$TAPIR_CORE_ANALYSIS_COMPOSE" \
   ps --format '{{.Service}} {{.State}}'
+
+# The configuration files are not the system's state; the buckets are. Assert
+# the lifetime that observations will actually carry.
+for TAPIR_BUCKET in \
+  globally_new_bucket \
+  looptest_bucket \
+  registry_investigation_bucket
+do
+  TAPIR_BUCKET_AGE="$(tapir_nats stream info "KV_$TAPIR_BUCKET" --json 2>/dev/null \
+    | jq -r '.config.max_age // empty' || true)"
+  test -n "$TAPIR_BUCKET_AGE" \
+    || { echo "$TAPIR_BUCKET was not recreated by the encoder" >&2; exit 1; }
+  printf '%s max age %ss\n' "$TAPIR_BUCKET" "$((TAPIR_BUCKET_AGE / 1000000000))"
+  test "$TAPIR_BUCKET_AGE" -eq "$((TAPIR_OBSERVATION_TTL * 1000000000))"
+done
 )
 ```
 
