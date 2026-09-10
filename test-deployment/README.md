@@ -4,6 +4,10 @@ Runbooks and scripts for standing up a three-VM DNS TAPIR test environment from
 source. Every DNS TAPIR component is built from a clone rather than pulled as a
 published image, so the deployment is whatever commit you checked out.
 
+The Edge runs both halves of the pipeline: EDM carries observations up to Core,
+and TAPIR-POP brings Core's conclusions back down. Both are needed, because a
+round-trip is what DNS TAPIR's own looptest verifies.
+
 ## The three VMs
 
 | VM | Runbook | Holds state |
@@ -42,6 +46,7 @@ actually operates.
 | Path | Transport | Authentication |
 |---|---|---|
 | Edge → Core Mosquitto | TLS 1.3 | Client certificate, plus a topic ACL |
+| Core → Edge observations | signed JWS over that MQTT link | Verified against a key NodeMan hands each node at enrolment |
 | Core services → NATS | Plaintext | Username and password in the URL |
 | Core services → MongoDB | Plaintext | SCRAM, one user per service |
 | Core aggrec → S3 | Plaintext | Access keys |
@@ -67,7 +72,8 @@ passed is what is written here.
 Not yet exercised, and worth knowing before you rely on it:
 
 - The services runbook has never been run **as written** — only
-  `dnstapir-services-install.sh`, which implements it.
+  `dnstapir-services-install.sh`, which implements it. Its CA and signing-key
+  steps have been exercised directly.
 - The backup and restore procedure in services runbook section 11. An untested
   restore is not a backup, and the CA cannot be recreated.
 - The privileged bootstrap on a genuinely fresh host since the runbooks last

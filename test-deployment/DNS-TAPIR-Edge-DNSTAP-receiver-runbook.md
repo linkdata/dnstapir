@@ -7,10 +7,16 @@
 
 ## 1. Scope and topology
 
-This guide installs EDM on a dedicated Edge VM. EDM listens for an unencrypted
-DNSTAP stream from a resolver on TCP 53535, minimises the data, signs each
-new-qname event, and sends it to the Core broker over mutual-TLS MQTT on TCP
-8883. The resolver remains outside the Edge VM.
+This guide installs an Edge on a dedicated VM: EDM and TAPIR-POP. EDM listens
+for an unencrypted DNSTAP stream from a resolver on TCP 53535, minimises the
+data, signs each new-qname event, and sends it to the Core broker over
+mutual-TLS MQTT on TCP 8883. POP subscribes to the observations Core sends back,
+applies local policy, and compiles them into a single RPZ zone. The resolver
+remains outside the Edge VM.
+
+The two directions matter equally. EDM alone proves only that data leaves the
+Edge; POP is what closes the loop, and it is how DNS TAPIR's own looptest
+verifies a complete round-trip.
 
 The Core runbook must already have completed Sections 11 and 12. Those sections
 install NATS, NodeMan, Mosquitto, and `mqtt-bridge`; this Edge guide does not
@@ -61,12 +67,16 @@ There is also an official container stack,
 [`dnstapir/edge-stack`](https://github.com/dnstapir/edge-stack), which bundles
 the resolver alongside EDM and points at hosted Core infrastructure. It is a
 better starting point than this runbook for anyone who wants Edge in containers,
-and it avoids the external-resolver plumbing in Section 11 entirely.
+and it avoids the external-resolver plumbing in Section 12 entirely.
 
-Two further reasons not to copy this guide into production: EDM is built from
-source here, for the reasons given below, rather than installed from a package
-or a published image; and the Crypto-PAn key, the DAWG file, and the node name
-are all throwaway test values.
+Two further reasons not to copy this guide into production: EDM and POP are
+built from source here, for the reasons given below, rather than installed from
+packages or published images; and the Crypto-PAn key, the DAWG file, and the
+node names are all throwaway test values.
+
+POP is installed in Section 11 but with no downstream resolver configured, so it
+compiles the RPZ zone and serves it to nobody. Section 12 adds the resolver that
+consumes it.
 
 For a real deployment, start from the official documentation instead:
 
@@ -990,7 +1000,362 @@ TAPIR_EDGE_KEEP_RUNNING=1
 )
 ```
 
-## 11. Configure external Unbound as `[resolver-admin]`
+## 11. Install the policy processor as `[edge-service]`
+
+An Edge is not complete without TAPIR-POP. EDM carries observations *up* to
+Core; POP is what brings Core's conclusions back *down*, applies local policy,
+and turns them into a single RPZ zone. It is also how DNS TAPIR proves a
+round-trip: without it, only half the pipeline can be tested.
+
+This section installs POP against the observation feed and stops there. It
+serves the RPZ zone but sends `NOTIFY` to nobody, which is deliberate — the
+resolver in Section 12 is a consumer of POP's output, not a prerequisite for
+running it. `pop-outputs.yaml` must exist but may declare no active outputs.
+
+POP needs its own node identity, separate from EDM's, so this section starts
+with an enrolment of its own.
+
+### 11.1 Build POP from source
+
+POP's `main` package is at its repository root rather than under `./cmd`, so it
+needs its own Dockerfile rather than the one Core uses for the analysis images.
+
+```bash
+(
+set -euo pipefail
+
+TAPIR_POP_SOURCE="$TAPIR_EDGE_SRC/pop"
+TAPIR_POP_ROOT="$TAPIR_EDGE_ROOT/pop"
+TAPIR_POP_DOCKERFILE="$TAPIR_EDGE_RUN/pop.Dockerfile"
+TAPIR_POP_IMAGE=pop:edge-runtime
+
+test "$(id -un)" = "$TAPIR_EDGE_SERVICE_USER"
+mkdir -p "$TAPIR_EDGE_RUN"
+
+if [ ! -d "$TAPIR_POP_SOURCE/.git" ]; then
+  git clone https://github.com/dnstapir/pop.git "$TAPIR_POP_SOURCE"
+fi
+TAPIR_POP_COMMIT="$(git -C "$TAPIR_POP_SOURCE" rev-parse HEAD)"
+printf 'pop %s\n' "$TAPIR_POP_COMMIT" >> "$TAPIR_EDGE_LOGS/source-versions.txt"
+
+cat > "$TAPIR_POP_DOCKERFILE" <<EOF
+FROM golang:latest AS builder
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 go build -buildvcs=false \\
+      -ldflags "-X main.version=0.0.0 -X main.commit=$TAPIR_POP_COMMIT -X main.name=dnstapir-pop" \\
+      -o /out/dnstapir-pop .
+
+FROM fedora:42
+COPY --from=builder /out/dnstapir-pop /usr/bin/dnstapir-pop
+ENTRYPOINT ["/usr/bin/dnstapir-pop"]
+EOF
+
+docker build \
+  --tag "$TAPIR_POP_IMAGE" \
+  --file "$TAPIR_POP_DOCKERFILE" \
+  "$TAPIR_POP_SOURCE"
+
+docker image inspect "$TAPIR_POP_IMAGE" --format 'pop={{.Id}} size={{.Size}}'
+)
+```
+
+### 11.2 Enrol the policy processor
+
+POP authenticates to Core's broker with its own certificate, so it needs a node
+record of its own. Create the enrolment file on Core exactly as Section 12.7 of
+the Core runbook does, but with the POP node name, and transfer it here the same
+way.
+
+The name must be unique and must never have been enrolled before; Section 12.7
+of the Core runbook explains why, and how to recover if it has.
+
+```bash
+export TAPIR_POP_ID=pop-01.edge.test
+printf 'POP node name: %s\n' "$TAPIR_POP_ID"
+```
+
+With `/tmp/$TAPIR_POP_ID-enrollment.json` in place, enrol:
+
+```bash
+(
+set -euo pipefail
+
+TAPIR_NODEMAN_SOURCE="$TAPIR_EDGE_SRC/nodeman"
+TAPIR_POP_ROOT="$TAPIR_EDGE_ROOT/pop"
+TAPIR_POP_KEYS="$TAPIR_POP_ROOT/keys"
+TAPIR_POP_ENROLL_LOG="$TAPIR_EDGE_LOGS/pop-enrollment.log"
+
+test -n "$TAPIR_POP_ID"
+test -s "/tmp/$TAPIR_POP_ID-enrollment.json"
+install -d -m 0700 "$TAPIR_POP_ROOT" "$TAPIR_POP_KEYS"
+install -m 0600 "/tmp/$TAPIR_POP_ID-enrollment.json" "$TAPIR_POP_KEYS/enrollment.json"
+rm -f "/tmp/$TAPIR_POP_ID-enrollment.json"
+
+cd "$TAPIR_NODEMAN_SOURCE"
+"$TAPIR_EDGE_UV" run nodeman_client \
+  --data-jwk-file "$TAPIR_POP_KEYS/data.json" \
+  --tls-cert-file "$TAPIR_POP_KEYS/tls.crt" \
+  --tls-key-file "$TAPIR_POP_KEYS/tls.key" \
+  --tls-ca-file "$TAPIR_POP_KEYS/tls-ca.crt" \
+  enroll \
+  --file "$TAPIR_POP_KEYS/enrollment.json" \
+  2>&1 | tee "$TAPIR_POP_ENROLL_LOG"
+
+rm -f "$TAPIR_POP_KEYS/enrollment.json"
+chmod 0600 "$TAPIR_POP_KEYS/data.json" "$TAPIR_POP_KEYS/tls.key"
+chmod 0644 "$TAPIR_POP_KEYS/tls.crt" "$TAPIR_POP_KEYS/tls-ca.crt"
+
+openssl verify -CAfile "$TAPIR_POP_KEYS/tls-ca.crt" "$TAPIR_POP_KEYS/tls.crt"
+openssl x509 -in "$TAPIR_POP_KEYS/tls.crt" -noout -subject -dates
+)
+```
+
+### 11.3 Write the configuration
+
+POP reads four files from `/etc/dnstapir`, and the paths are compiled in: running
+the binary with none of them present names the first one it wants. All four must
+exist even when a section of one is empty.
+
+Two details are worth stating before the block, because neither is obvious and
+both fail confusingly:
+
+- **Every logfile is a required field.** The shipped samples read as though they
+  are optional, and POP even logs `No dnsengine logfile specified, using
+  default` — and then refuses to start, because validation requires
+  `DnsengineConf.Logfile`. Set all of them.
+- **`keystore.path` is a JWK Set, not a certificate.** It is what verifies the
+  signature on every inbound observation, so it must contain the public half of
+  Core's MQTT signing key. NodeMan hands that key to every node it enrols, in
+  the `trusted_jwks` field of the enrolment response, which is why the block
+  below builds the keystore from the enrolment log rather than asking you to
+  copy a file from Core.
+
+```bash
+(
+set -euo pipefail
+
+TAPIR_POP_ROOT="$TAPIR_EDGE_ROOT/pop"
+TAPIR_POP_KEYS="$TAPIR_POP_ROOT/keys"
+TAPIR_POP_ETC="$TAPIR_POP_ROOT/etc"
+TAPIR_POP_ENROLL_LOG="$TAPIR_EDGE_LOGS/pop-enrollment.log"
+TAPIR_POP_APIKEY="$(openssl rand -hex 16)"
+
+install -d -m 0755 "$TAPIR_POP_ETC" "$TAPIR_POP_ETC/certs"
+install -m 0644 "$TAPIR_POP_KEYS/tls.crt"    "$TAPIR_POP_ETC/certs/tapir-edge.crt"
+install -m 0600 "$TAPIR_POP_KEYS/tls.key"    "$TAPIR_POP_ETC/certs/tapir-edge.key"
+install -m 0644 "$TAPIR_POP_KEYS/tls-ca.crt" "$TAPIR_POP_ETC/certs/tapirCA.crt"
+
+# The keystore is the JWK Set that validates inbound observations. NodeMan
+# returned it as trusted_jwks when this node enrolled.
+python3 - "$TAPIR_POP_ENROLL_LOG" "$TAPIR_POP_ETC/keystore.json" <<'PYKEYSTORE'
+import json, re, sys
+log, out = sys.argv[1], sys.argv[2]
+text = open(log).read()
+start = text.find("{")
+if start < 0:
+    raise SystemExit("no JSON object in the enrolment log")
+obj = json.JSONDecoder().raw_decode(text[start:])[0]
+keys = obj.get("trusted_jwks", {}).get("keys", [])
+if not keys:
+    raise SystemExit(
+        "NodeMan returned no trusted_jwks; Core has not been given the MQTT "
+        "signing key (Core runbook section 12.4)"
+    )
+json.dump({"keys": keys}, open(out, "w"))
+print("keystore holds %d key(s): %s" % (len(keys), ", ".join(k.get("kid", "?") for k in keys)))
+PYKEYSTORE
+chmod 0644 "$TAPIR_POP_ETC/keystore.json"
+
+cat > "$TAPIR_POP_ETC/dnstapir-pop.yaml" <<EOF
+log:
+   mode:    debug
+   file:    /var/log/dnstapir/pop.log
+   verbose: true
+   debug:   true
+services:
+   rpz:
+      zonename:    rpz.edge.test.
+      serialcache: /var/cache/dnstapir/pop-serial.yaml
+   reaper:
+      interval: 3600
+   refreshengine:
+      active: true
+service:
+   reset_soa_serial: false
+   maxrefresh:       3600
+apiserver:
+   active:       true
+   name:         pop-api
+   key:          $TAPIR_POP_APIKEY
+   addresses:    [ 0.0.0.0:9099 ]
+   tlsaddresses: [ 0.0.0.0:9098 ]
+dnsengine:
+   active:    true
+   name:      pop-dns
+   addresses: [ 0.0.0.0:5360 ]
+   logfile:   /var/log/dnstapir/pop-dnsengine.log
+bootstrapserver:
+   active:  false
+   name:    pop-bootstrap
+   logfile: /var/log/dnstapir/pop-bootstrap.log
+   addresses:    []
+   tlsaddresses: []
+keystore:
+   path: /etc/dnstapir/keystore.json
+tapir:
+   config:
+      active: false
+   status:
+      active: false
+   mqtt:
+      mode:            optional
+      connect-timeout: 10
+      logfile:    /var/log/dnstapir/pop-mqtt.log
+      server:     tls://$TAPIR_CORE_VM_IP:$TAPIR_CORE_MQTT_PORT
+      clientid:   $TAPIR_POP_ID
+      qos:        2
+      cacert:     /etc/dnstapir/certs/tapirCA.crt
+      clientcert: /etc/dnstapir/certs/tapir-edge.crt
+      clientkey:  /etc/dnstapir/certs/tapir-edge.key
+certs:
+   certdir:    /etc/dnstapir/certs
+   cacertfile: /etc/dnstapir/certs/tapirCA.crt
+   tapir-pop:
+      cert: /etc/dnstapir/certs/tapir-edge.crt
+      key:  /etc/dnstapir/certs/tapir-edge.key
+EOF
+
+cat > "$TAPIR_POP_ETC/pop-sources.yaml" <<'EOF'
+sources:
+   tapir-observations:
+      active:      true
+      name:        dns-tapir
+      description: DNS TAPIR main intelligence feed
+      type:        doubtlist
+      format:      json
+      source:      mqtt
+      topic:       observations/down/tapir-pop
+      immutable:   false
+EOF
+
+cat > "$TAPIR_POP_ETC/pop-outputs.yaml" <<'EOF'
+# No downstream resolver in this deployment. The file must exist, but zero
+# active outputs is not an error: pop registers a NOTIFY receiver only for
+# outputs that are active and RPZ-format, and simply has none.
+outputs: {}
+EOF
+
+cat > "$TAPIR_POP_ETC/pop-policy.yaml" <<'EOF'
+policy:
+   logfile: /var/log/dnstapir/pop-policy.log
+   allowlist:
+      action: allowlist
+   denylist:
+      action: nxdomain
+   doubtlist:
+      numsources:
+         limit:  3
+         action: nxdomain
+      numtapirtags:
+         limit:  2
+         action: drop
+      denytapir:
+         tags:   [ likelymalware, badip ]
+         action: drop
+EOF
+
+chmod 0600 "$TAPIR_POP_ETC/dnstapir-pop.yaml"
+printf 'POP API key recorded in %s\n' "$TAPIR_POP_ETC/dnstapir-pop.yaml"
+)
+```
+
+### 11.4 Start POP and verify the feed
+
+`tapir.mqtt.mode` is `optional`, which means POP starts even when the broker is
+unreachable. That is convenient but it hides failures: a POP that cannot verify
+the feed keeps running and quietly holds an empty list. The checks below are
+therefore about the feed, not about the process being up.
+
+```bash
+(
+set -euo pipefail
+
+TAPIR_POP_ROOT="$TAPIR_EDGE_ROOT/pop"
+TAPIR_POP_ETC="$TAPIR_POP_ROOT/etc"
+TAPIR_POP_IMAGE=pop:edge-runtime
+
+docker volume create pop-cache >/dev/null
+docker volume create pop-logs >/dev/null
+docker rm --force pop >/dev/null 2>&1 || true
+
+# UID 0 maps to the service account under Rootless Docker, so POP can read the
+# mode-0600 key and configuration without host root.
+docker run --detach --name pop --user "0:0" --restart unless-stopped \
+  --publish 127.0.0.1:9099:9099 \
+  --publish 127.0.0.1:5360:5360/udp \
+  --volume "$TAPIR_POP_ETC:/etc/dnstapir:ro" \
+  --volume pop-cache:/var/cache/dnstapir \
+  --volume pop-logs:/var/log/dnstapir \
+  "$TAPIR_POP_IMAGE" >/dev/null
+
+for attempt in $(seq 1 30); do
+  if docker run --rm --volume pop-logs:/l busybox:latest \
+       grep -c 'added sub topic observations/down/tapir-pop' /l/pop.log \
+       >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+
+docker ps --filter name=pop --format '{{.Names}} {{.Status}}'
+docker run --rm --volume pop-logs:/l busybox:latest \
+  grep -c 'added sub topic observations/down/tapir-pop' /l/pop.log >/dev/null
+echo "POP subscribed to the observation topic"
+)
+```
+
+Write a CLI configuration so `dnstapir-cli` can reach POP's API, then confirm
+that observations are arriving and being verified:
+
+```bash
+(
+set -euo pipefail
+
+TAPIR_POP_ROOT="$TAPIR_EDGE_ROOT/pop"
+TAPIR_POP_ETC="$TAPIR_POP_ROOT/etc"
+TAPIR_POP_CLI_CONFIG="$TAPIR_POP_ROOT/dnstapir-cli.yaml"
+TAPIR_POP_APIKEY="$(awk '/^   key:/ { print $2; exit }' "$TAPIR_POP_ETC/dnstapir-pop.yaml")"
+
+test -n "$TAPIR_POP_APIKEY"
+cat > "$TAPIR_POP_CLI_CONFIG" <<EOF
+cli:
+   tapir-pop:
+      url:    http://127.0.0.1:9099/api/v1
+      tlsurl: https://127.0.0.1:9098/api/v1
+      apikey: $TAPIR_POP_APIKEY
+certs:
+   cacertfile: $TAPIR_POP_ETC/certs/tapirCA.crt
+   cert:       $TAPIR_POP_ETC/certs/tapir-edge.crt
+   key:        $TAPIR_POP_ETC/certs/tapir-edge.key
+EOF
+chmod 0600 "$TAPIR_POP_CLI_CONFIG"
+
+"$TAPIR_EDGE_BIN/dnstapir-cli" --config "$TAPIR_POP_CLI_CONFIG" --tls=false pop ping
+"$TAPIR_EDGE_BIN/dnstapir-cli" --config "$TAPIR_POP_CLI_CONFIG" --tls=false pop status
+
+# An observation that has actually been verified against the keystore.
+docker run --rm --volume pop-logs:/l busybox:latest \
+  grep -c 'ProcessTapirUpdate: update of MQTT source' /l/pop.log >/dev/null
+echo "POP is processing verified observations from Core"
+)
+```
+
+If the last check fails while POP is running and connected, the usual cause is
+the keystore: Core signed with a key POP does not hold. Section 16 has the
+diagnosis.
+
+## 12. Configure external Unbound as `[resolver-admin]`
 
 Configure the resolver host only after EDM is listening:
 
@@ -1063,15 +1428,15 @@ alone produces no `new_qname` events at all.
 This matches the configuration in the official
 [`dnstapir/edge-stack`](https://github.com/dnstapir/edge-stack).
 
-## 12. Verify the complete resolver-to-Core path
+## 13. Verify the complete resolver-to-Core path
 
-Use separate SSH sessions. Section 12.1 chooses the name, prints it, and blocks
-until that name arrives; Section 12.2 sends it from the other session. The
+Use separate SSH sessions. Section 13.1 chooses the name, prints it, and blocks
+until that name arrives; Section 13.2 sends it from the other session. The
 subscriber filters on the name rather than accepting the first event, because a
 resolver carrying real traffic publishes `new_qname` events continuously and an
 unfiltered subscriber would capture one of those instead.
 
-### 12.1 Wait for a specific event as `[core-service]`
+### 13.1 Wait for a specific event as `[core-service]`
 
 ```bash
 export TAPIR_CORE_SERVICE_USER=dnstapir
@@ -1079,7 +1444,7 @@ sudo -iu "$TAPIR_CORE_SERVICE_USER"
 ```
 
 This block chooses the name to test with, prints it, and then blocks until that
-exact name arrives on the Core subject. Run Section 12.2 in the other session
+exact name arrives on the Core subject. Run Section 13.2 in the other session
 while it waits.
 
 Filtering on the name matters more than it looks. A resolver feeding a real
@@ -1109,7 +1474,7 @@ test -n "$TAPIR_SERVICES_NATS_BRIDGE_URL"
 mkdir -p "$TAPIR_LOGS"
 
 TAPIR_TEST_QNAME="tapir-e2e-$(date +%s).invalid"
-printf '\nSend exactly this name in Section 12.2:\n\n    %s\n\n' "$TAPIR_TEST_QNAME"
+printf '\nSend exactly this name in Section 13.2:\n\n    %s\n\n' "$TAPIR_TEST_QNAME"
 printf 'Waiting up to %s seconds on %s\n\n' \
   "$TAPIR_CORE_EVENT_WAIT" "$TAPIR_CORE_EVENT_SUBJECT"
 
@@ -1149,16 +1514,16 @@ events but not this one, meaning EDM never emitted it; or the name present,
 meaning the path works.
 
 An event count of zero alongside a failure means nothing reached Core, so start
-from the Edge end in Section 15. A high count with the name missing points at
+from the Edge end in Section 16. A high count with the name missing points at
 EDM: the name was already in `well-known-domains.dawg`, or it had been seen
 before and was deduplicated.
 
-### 12.2 Generate a unique query as `[resolver-admin]`
+### 13.2 Generate a unique query as `[resolver-admin]`
 
 ```bash
 export TAPIR_RESOLVER_LISTEN_IP=127.0.0.1
 
-# The name Section 12.1 printed, with a trailing dot. Section 12.1 is waiting
+# The name Section 13.1 printed, with a trailing dot. Section 13.1 is waiting
 # for this exact string; generating a fresh one here would leave it waiting.
 export TAPIR_TEST_QNAME="tapir-e2e-1234567890.invalid."
 
@@ -1288,10 +1653,10 @@ test -s "$TAPIR_EDGE_SENDER_DIR/dnstap-sender"
 chmod 0755 "$TAPIR_EDGE_SENDER_DIR/dnstap-sender"
 ```
 
-Then, with the Section 12.1 subscriber already waiting, send one unique name:
+Then, with the Section 13.1 subscriber already waiting, send one unique name:
 
 ```bash
-# The name Section 12.1 printed. It is waiting for this exact string.
+# The name Section 13.1 printed. It is waiting for this exact string.
 TAPIR_TEST_QNAME=tapir-e2e-1234567890.invalid
 
 printf 'Test query: %s\n' "$TAPIR_TEST_QNAME"
@@ -1303,7 +1668,7 @@ The name must not appear in `well-known-domains.dawg` and must not have been
 sent before, because EDM only emits a `new_qname` event for a name that is both
 absent from the DAWG and unseen. A timestamped `.invalid` name satisfies both.
 
-### 12.3 Inspect every hop
+### 13.3 Inspect every hop
 
 In the Core service session:
 
@@ -1332,14 +1697,14 @@ curl --fail --silent http://127.0.0.1:2112/metrics \
   | grep -Ei 'dnstap|mqtt|qname|message' || true
 ```
 
-The test passes when Section 12.1 exits zero, having matched the name it
+The test passes when Section 13.1 exits zero, having matched the name it
 printed, and the bridge log contains no key, signature, or schema validation
 error. The capture file holds every event seen during the wait, so its size is a
 measure of how much other traffic the resolver was carrying at the time.
 
-## 13. Operating and certificate-renewal commands
+## 14. Operating and certificate-renewal commands
 
-### 13.1 Edge status, logs, stop, and ordered start
+### 14.1 Edge status, logs, stop, and ordered start
 
 After a reboot, enter the service account:
 
@@ -1422,7 +1787,7 @@ docker compose --file "$TAPIR_EDGE_COMPOSE" up -d edm
 docker compose --file "$TAPIR_EDGE_COMPOSE" ps
 ```
 
-### 13.2 Check and renew the Edge certificate
+### 14.2 Check and renew the Edge certificate
 
 Show the subject and expiry, then fail if fewer than seven days remain:
 
@@ -1487,12 +1852,12 @@ in both runbooks. Section 12.5 of the Core runbook explains why: under
 `set -o pipefail` a `grep -q` that exits early kills its producer with
 `SIGPIPE`, which `pipefail` then reports as a failure of the whole pipeline.
 
-### 13.3 Core status and restart order
+### 14.3 Core status and restart order
 
 Use Section 13 of the Core runbook. Its complete start command orders NATS and
 analysis services before MongoDB, NodeMan, Mosquitto, and `mqtt-bridge`.
 
-## 14. Cleanup
+## 15. Cleanup
 
 Stop Edge while preserving credentials and data:
 
@@ -1522,8 +1887,12 @@ rm -f \
   "$TAPIR_EDGE_TLS_CA"
 ```
 
-Those files and volumes are not recoverable by this command. The NodeMan record
-on Core must also be cleared before the same node name can be enrolled again.
+Those files and volumes are not recoverable by this command.
+
+Re-enrolling needs a **new** node name. A name is claimed permanently once
+enrolled, by design, and the record now lives on the services VM so it outlasts
+Core. The block below reaches into the database to free a name anyway, which is
+a test-rig convenience with no production equivalent; prefer a fresh name.
 
 Run this as `[core-service]` on the Core VM. Note that the `DELETE` call alone
 is **not** sufficient: it is a soft delete that stamps a `deleted` timestamp and
@@ -1556,18 +1925,24 @@ docker compose --file "$TAPIR_CORE_RUNTIME_COMPOSE" exec -T mongo \
 The final count must be `0`. Enrolling a node name that has never been used
 avoids this entirely.
 
-## 15. Troubleshooting
+## 16. Troubleshooting
 
 ### Enrollment returns an HTTP error
 
-An `HTTP 500` from `POST /api/v1/node` means the node name already exists.
-NodeMan does not convert a duplicate name into a `409`; MongoDB's unique index
-raises and the traceback ends in
-`mongoengine.errors.NotUniqueError ... E11000 duplicate key error ... index:
-name_1`. `DELETE /api/v1/node/{name}` does not free the name; Section 14 has the
-detail and the fix. Section 12.7 of the Core runbook lists the three ways to
-proceed; all of them discard the node's enrolled signing key, so Section 7.3
-must then be run in full.
+`HTTP 409` with `{"detail":"Node name ... already exists"}` from
+`POST /api/v1/node` means exactly that: the name is taken. Note that node records
+live on the services VM, so they survive a Core rebuild — a name enrolled by a
+previous Core is still enrolled.
+
+`DELETE /api/v1/node/{name}` returns `204` and hides the name from
+`GET /api/v1/nodes`, but does not free it, and that is by design: a node name is
+a permanent identifier and is never recycled. Allocate a new name rather than
+trying to reclaim one. Section 12.7 of the Core runbook covers the test-rig
+escape hatch if you must; either way the node's enrolled signing key is
+discarded, so Section 7.3 must then be run in full.
+
+An older NodeMan answers `HTTP 500` with a `NotUniqueError` traceback instead of
+the `409`. The cause and the fix are identical.
 
 On Edge:
 
@@ -1589,7 +1964,7 @@ docker compose --file "$TAPIR_CORE_RUNTIME_COMPOSE" \
 ```
 
 A bootstrap key is single-use. If the node is already enrolled, keep its
-existing `data.json`; otherwise delete the NodeMan record with Section 14 and
+existing `data.json`; otherwise delete the NodeMan record with Section 15 and
 create a new enrollment file.
 
 ### TLS verification or MQTT connection fails
@@ -1682,6 +2057,39 @@ docker compose --file "$TAPIR_TEST_ROOT/core-runtime/compose.yaml" \
   restart mqtt-bridge
 ```
 
+### POP runs but its lists stay empty
+
+`tapir.mqtt.mode: optional` means POP starts even when it cannot use the feed,
+so "the container is up" proves nothing. Work down this list:
+
+```bash
+TAPIR_POP_ETC="$TAPIR_EDGE_ROOT/pop/etc"
+
+# 1. Did it subscribe at all?
+docker run --rm --volume pop-logs:/l busybox:latest \
+  grep -c 'added sub topic observations/down/tapir-pop' /l/pop.log
+
+# 2. Is the keystore populated, and with which key?
+python3 -c "
+import json, sys
+ks = json.load(open(sys.argv[1]))
+print('keystore keys:', [k.get('kid') for k in ks.get('keys', [])])
+" "$TAPIR_POP_ETC/keystore.json"
+
+# 3. What does POP say about the engine?
+docker run --rm --volume pop-logs:/l busybox:latest \
+  grep -iE 'keystor|mqtt.*(unavailable|not enabled)|WARNING' /l/pop.log | tail -5
+```
+
+An empty keystore, or `NewMqttEngine: error reading keystorage file`, means
+NodeMan had no `trusted_jwks` when this node enrolled — Core was configured
+before it had the MQTT signing key. Fix Core (Section 12.4 of the Core runbook),
+then re-enrol POP: the keystore is built from the enrolment response, so it is
+only as good as what NodeMan held at that moment.
+
+A populated keystore whose `kid` does not match the `kid` in the observations
+means Core is signing with a different key than the services VM issued.
+
 ### Resolver cannot reach the DNSTAP listener
 
 On Edge:
@@ -1703,7 +2111,7 @@ sudo unbound-checkconf
 sudo journalctl --unit unbound --lines 200 --no-pager
 ```
 
-## 16. Completion checklist
+## 17. Completion checklist
 
 - [ ] Docker is installed before any application Docker command.
 - [ ] `dnstapir` has no `sudo` access and is not in the `docker` group.
@@ -1729,9 +2137,13 @@ sudo journalctl --unit unbound --lines 200 --no-pager
 - [ ] mqtt-bridge retrieves the Edge public signing key from NodeMan.
 - [ ] A unique resolver query reaches the Core NATS subject, matched by name
       rather than by taking the first event seen.
+- [ ] POP was built from source and enrolled under its own node name.
+- [ ] POP's keystore was built from NodeMan's `trusted_jwks`, not copied by hand.
+- [ ] POP subscribed to `observations/down/tapir-pop`.
+- [ ] POP processed at least one verified observation from Core.
 - [ ] Certificate renewal succeeds and EDM reconnects.
 
-## 17. Sources
+## 18. Sources
 
 - [DNS TAPIR security brief](https://www.dnstapir.se/docs/security-brief/)
 - [DNS TAPIR technical documentation](https://dnstapir.github.io/techdocs)

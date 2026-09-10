@@ -34,10 +34,11 @@ This VM runs three services and holds one set of files:
   volume instead of inside the container.
 - **RustFS** — S3-compatible storage for aggregates, standing in for the S3
   bucket a deployed Core uses.
-- **The CA** — the issuer key and certificate NodeMan needs to enroll and renew
-  Edge nodes, plus the Mosquitto and `mqtt-bridge` certificates Core runs with.
-  These are files, not a service. Generating them here and handing Core a copy
-  is what lets Core be rebuilt without invalidating every Edge.
+- **The CA and the MQTT signing key** — the issuer key and certificate NodeMan
+  needs to enroll and renew Edge nodes, the Mosquitto and `mqtt-bridge`
+  certificates Core runs with, and the key Core signs downbound observations
+  with. These are files, not a service. Generating them here and handing Core a
+  copy is what lets Core be rebuilt without invalidating every Edge.
 
 Mosquitto stays on the Core VM: it holds no state, and it is the port the Edge
 firewall rule targets.
@@ -276,7 +277,7 @@ docker version --format 'client={{.Client.Version}} server={{.Server.Version}}'
 overrides the selected context. That is expected: the login environment written
 by Section 3 already points `DOCKER_HOST` at the same rootless socket.
 
-## 6. Create the CA and Core service certificates as `[services-service]`
+## 6. Create the CA, service certificates and signing key as `[services-service]`
 
 This is the procedure the Core runbook used to run locally, moved here so the CA
 survives a Core rebuild. NodeMan needs the issuer private key to sign Edge
@@ -403,6 +404,68 @@ after an Edge fails to connect.
 
 The certificates last 825 days and the CA 10 years, so neither needs renewing
 within the life of a test deployment. Section 12 has the expiry check anyway.
+
+### The MQTT signing key
+
+Core signs the observations it sends down to Edge policy processors, and each
+processor verifies them against the public half. That key belongs here for the
+same reason the CA does: if Core generated it, a Core rebuild would produce a
+new one and every enrolled policy processor would silently stop trusting the
+feed — silently, because a processor with a stale key keeps running and simply
+receives nothing.
+
+It is an Ed25519 JWK. `openssl` has no JWK output, but for Ed25519 both the
+PKCS#8 and SubjectPublicKeyInfo encodings carry the 32-byte key as their final
+32 bytes, so no extra tooling is needed.
+
+```bash
+set -euo pipefail
+
+TAPIR_SERVICES_SIGNER_DIR="$TAPIR_SERVICES_CA/mqtt-signer"
+TAPIR_SERVICES_SIGNER_KID=core-mqtt-signer
+
+mkdir -p "$TAPIR_SERVICES_SIGNER_DIR"
+chmod 0700 "$TAPIR_SERVICES_SIGNER_DIR"
+
+if [ ! -s "$TAPIR_SERVICES_SIGNER_DIR/mqtt-signer.json" ]; then
+  TAPIR_SERVICES_SIGNER_TMP="$(mktemp -d)"
+  openssl genpkey -algorithm Ed25519 -out "$TAPIR_SERVICES_SIGNER_TMP/k.pem"
+  openssl pkey -in "$TAPIR_SERVICES_SIGNER_TMP/k.pem" \
+    -outform DER -out "$TAPIR_SERVICES_SIGNER_TMP/priv.der"
+  openssl pkey -in "$TAPIR_SERVICES_SIGNER_TMP/k.pem" \
+    -pubout -outform DER -out "$TAPIR_SERVICES_SIGNER_TMP/pub.der"
+
+  python3 - "$TAPIR_SERVICES_SIGNER_TMP" "$TAPIR_SERVICES_SIGNER_DIR" \
+    "$TAPIR_SERVICES_SIGNER_KID" <<'PYSIGNER'
+import base64, json, pathlib, sys
+tmp, out, kid = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+d = (tmp / "priv.der").read_bytes()[-32:]
+x = (tmp / "pub.der").read_bytes()[-32:]
+common = {"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "kid": kid}
+(out / "mqtt-signer.json").write_text(json.dumps({**common, "d": b64(d), "x": b64(x)}))
+(out / "mqtt-signer-pub.json").write_text(json.dumps({**common, "x": b64(x)}))
+PYSIGNER
+
+  rm -rf "$TAPIR_SERVICES_SIGNER_TMP"
+fi
+
+chmod 0600 "$TAPIR_SERVICES_SIGNER_DIR/mqtt-signer.json"
+chmod 0644 "$TAPIR_SERVICES_SIGNER_DIR/mqtt-signer-pub.json"
+
+# The private key must carry d; the public half must not.
+python3 -c "
+import json, sys
+p = json.load(open(sys.argv[1])); q = json.load(open(sys.argv[2]))
+assert p['kty'] == 'OKP' and p['crv'] == 'Ed25519' and p['alg'] == 'EdDSA'
+assert 'd' in p and 'd' not in q and p['x'] == q['x'] and p['kid'] == q['kid']
+print('signing key ok, kid', p['kid'])
+" "$TAPIR_SERVICES_SIGNER_DIR/mqtt-signer.json" \
+  "$TAPIR_SERVICES_SIGNER_DIR/mqtt-signer-pub.json"
+```
+
+Like the CA, this block reuses an existing key rather than replacing one that
+enrolled processors already trust.
 
 ## 7. Write the persistent services configuration as `[services-service]`
 
@@ -719,7 +782,8 @@ do not.
 ## 10. Export the Core handover bundle as `[services-service]`
 
 Core needs the CA key and certificate, the Mosquitto and `mqtt-bridge`
-certificates, and the connection strings for MongoDB, NATS and RustFS.
+certificates, the MQTT signing key from Section 6, and the connection strings
+for MongoDB, NATS and RustFS.
 
 ```bash
 set -euo pipefail
@@ -745,6 +809,10 @@ install -m 0644 "$TAPIR_SERVICES_CA/mqtt-bridge/client.crt" \
   "$TAPIR_SERVICES_BUNDLE_DIR/ca/client.crt"
 install -m 0600 "$TAPIR_SERVICES_CA/mqtt-bridge/client.key" \
   "$TAPIR_SERVICES_BUNDLE_DIR/ca/client.key"
+install -m 0600 "$TAPIR_SERVICES_CA/mqtt-signer/mqtt-signer.json" \
+  "$TAPIR_SERVICES_BUNDLE_DIR/ca/mqtt-signer.json"
+install -m 0644 "$TAPIR_SERVICES_CA/mqtt-signer/mqtt-signer-pub.json" \
+  "$TAPIR_SERVICES_BUNDLE_DIR/ca/mqtt-signer-pub.json"
 
 ( umask 077
   cat > "$TAPIR_SERVICES_BUNDLE_DIR/services.env" <<EOF
@@ -1007,7 +1075,8 @@ docker system df -v | head -30
 - [ ] JetStream reports a `store_dir` on the named volume, not inside the container
 - [ ] **UFW is active** and restricts 27017, 4222 and 9000 to the Core VM address
 - [ ] The ports are unreachable from any address other than the Core VM
-- [ ] The handover bundle contains the CA, both Core certificates, and `services.env`
+- [ ] The handover bundle contains the CA, both Core certificates, the MQTT
+      signing key, and `services.env`
 - [ ] The handover directory is `0750` and the bundle `0640`, readable by the service group
 - [ ] A backup has been taken and copied off this VM
 - [ ] Every service declares `restart: unless-stopped` and returns after a reboot

@@ -1796,7 +1796,8 @@ therefore safe.
 The CA lives on the services VM so that it outlives this host. Core receives a
 copy of the issuer key, because NodeMan signs Edge certificate requests itself,
 along with the Mosquitto and `mqtt-bridge` certificates the services runbook
-issued for this VM's address.
+issued for this VM's address, and the key `mqtt-bridge` signs downbound
+observations with.
 
 Nothing is generated here. If a certificate is wrong or missing, fix it on the
 services VM and rebuild the bundle; do not create a local CA, or Edge nodes will
@@ -1811,7 +1812,8 @@ TAPIR_CORE_CA_DIR="$TAPIR_CORE_RUNTIME_ROOT/ca"
 TAPIR_CORE_BROKER_PKI_DIR="$TAPIR_CORE_RUNTIME_ROOT/mosquitto/pki"
 TAPIR_CORE_BRIDGE_DIR="$TAPIR_CORE_RUNTIME_ROOT/mqtt-bridge"
 
-for f in ca/ca.key ca/ca.crt ca/server.crt ca/server.key ca/client.crt ca/client.key; do
+for f in ca/ca.key ca/ca.crt ca/server.crt ca/server.key ca/client.crt ca/client.key \
+         ca/mqtt-signer.json ca/mqtt-signer-pub.json; do
   test -s "$TAPIR_SERVICES_DIR/$f"
 done
 
@@ -1827,6 +1829,12 @@ install -m 0644 "$TAPIR_SERVICES_DIR/ca/ca.crt"     "$TAPIR_CORE_BROKER_PKI_DIR/
 install -m 0600 "$TAPIR_SERVICES_DIR/ca/client.key" "$TAPIR_CORE_BRIDGE_DIR/client.key"
 install -m 0644 "$TAPIR_SERVICES_DIR/ca/client.crt" "$TAPIR_CORE_BRIDGE_DIR/client.crt"
 install -m 0644 "$TAPIR_SERVICES_DIR/ca/ca.crt"     "$TAPIR_CORE_BRIDGE_DIR/ca.crt"
+
+# The key mqtt-bridge signs downbound observations with. Its public half goes
+# into NodeMan's trusted JWKS in Section 12.4, which is how every enrolled
+# policy processor learns to verify this feed.
+install -m 0600 "$TAPIR_SERVICES_DIR/ca/mqtt-signer.json" \
+  "$TAPIR_CORE_BRIDGE_DIR/signing-key.json"
 
 openssl verify -CAfile "$TAPIR_CORE_CA_DIR/ca.crt" "$TAPIR_CORE_BROKER_PKI_DIR/server.crt"
 openssl verify -CAfile "$TAPIR_CORE_CA_DIR/ca.crt" "$TAPIR_CORE_BRIDGE_DIR/client.crt"
@@ -1918,6 +1926,7 @@ TAPIR_CORE_BROKER_PKI_DIR="$TAPIR_CORE_MOSQUITTO_DIR/pki"
 TAPIR_CORE_BRIDGE_DIR="$TAPIR_CORE_RUNTIME_ROOT/mqtt-bridge"
 TAPIR_CORE_BRIDGE_CONFIG="$TAPIR_CORE_BRIDGE_DIR/config.toml"
 TAPIR_CORE_BRIDGE_SCHEMA="$TAPIR_CORE_BRIDGE_DIR/new_qname.json"
+TAPIR_CORE_BRIDGE_SCHEMA_DOWN="$TAPIR_CORE_BRIDGE_DIR/edge_observations.json"
 TAPIR_CORE_MQTT_BRIDGE_IMAGE=mqtt-bridge:core-runtime
 TAPIR_CORE_NODEMAN_IMAGE=nodeman:core-runtime
 TAPIR_SERVICES_DIR="$TAPIR_TEST_ROOT/services-bundle"
@@ -1949,7 +1958,16 @@ TAPIR_NODEMAN_ADMIN_HASH="$(printf '%s\n' password \
   | "$TAPIR_UV" run python \
       -c 'from argon2 import PasswordHasher; import sys; print(PasswordHasher().hash(sys.stdin.readline().rstrip("\n")))')"
 
-printf '{"keys":[]}\n' > "$TAPIR_CORE_NODEMAN_JWKS"
+# NodeMan hands this set to every node it enrols. Putting the MQTT signing
+# public key here is how a policy processor learns to verify the observation
+# feed, without anyone copying a key between hosts by hand.
+python3 -c "
+import json, sys
+pub = json.load(open(sys.argv[1]))
+assert 'd' not in pub, 'refusing to publish a private key in trusted_jwks'
+json.dump({'keys': [pub]}, open(sys.argv[2], 'w'))
+print('trusted_jwks publishes kid', pub['kid'])
+" "$TAPIR_SERVICES_DIR/ca/mqtt-signer-pub.json" "$TAPIR_CORE_NODEMAN_JWKS"
 cat > "$TAPIR_CORE_NODEMAN_CONFIG" <<EOF
 [mongodb]
 server = "$TAPIR_SERVICES_MONGO_NODEMAN_URL"
@@ -2021,6 +2039,16 @@ chmod 0600 "$TAPIR_CORE_MOSQUITTO_ACL"
 install -m 0644 \
   "$TAPIR_MQTT_BRIDGE_SOURCE/itests/sut/mqtt-bridge/new_qname.json" \
   "$TAPIR_CORE_BRIDGE_SCHEMA"
+install -m 0644 \
+  "$TAPIR_MQTT_BRIDGE_SOURCE/itests/sut/mqtt-bridge/edge_observations.json" \
+  "$TAPIR_CORE_BRIDGE_SCHEMA_DOWN"
+
+# Read the subject from the encoder's own configuration rather than repeating
+# it, so the down bridge cannot drift from what Section 11 actually publishes.
+TAPIR_CORE_SOUTHBOUND_SUBJECT="$(awk -F'"' '/^subject_southbound/ { print $2; exit }' \
+  "$TAPIR_TEST_ROOT/core-analysis/observation-encoder/config.toml")"
+test -n "$TAPIR_CORE_SOUTHBOUND_SUBJECT"
+
 cat > "$TAPIR_CORE_BRIDGE_CONFIG" <<EOF
 Debug = true
 
@@ -2038,7 +2066,19 @@ NatsSubject = "core-integration-test.events.new_qname"
 NatsQueue = "eventQ"
 Key = ""
 Schema = "/etc/dnstapir/mqtt-bridge/new_qname.json"
+
+[[Bridges]]
+Direction = "down"
+MqttTopic = "observations/down/tapir-pop"
+NatsSubject = "$TAPIR_CORE_SOUTHBOUND_SUBJECT"
+NatsQueue = "observationsQ"
+Key = "/etc/dnstapir/mqtt-bridge/signing-key.json"
+Schema = "/etc/dnstapir/mqtt-bridge/edge_observations.json"
 EOF
+# NatsUrl carries the services VM password, so this file is not world-readable.
+# Container UID 0 maps to the service account under Rootless Docker, so the
+# bridge still reads it.
+chmod 0600 "$TAPIR_CORE_BRIDGE_CONFIG"
 
 cat > "$TAPIR_CORE_RUNTIME_COMPOSE" <<EOF
 services:
@@ -2355,18 +2395,33 @@ copy as soon as the transfer completes.
 This block creates the node record, so the name must not already exist, and a
 node name cannot be reused through the API once it has been created.
 
-NodeMan does not translate a duplicate name into a clean conflict: it lets
-MongoDB's unique index raise, so the API answers `HTTP 500` with a
-`mongoengine.errors.NotUniqueError` / `E11000 duplicate key error ... index:
-name_1` traceback in the NodeMan log, and `curl --fail` reports only
-`The requested URL returned error: 500`.
+NodeMan reports this cleanly:
 
-`DELETE /api/v1/node/{name}` does not release the name. It is a soft delete: it
-stamps a `deleted` timestamp and leaves the document in `nodeman.nodes`, so the
-name disappears from `GET /api/v1/nodes` while the unique index still holds it.
-A subsequent `POST` for the same name therefore still fails with `HTTP 500`.
+```
+HTTP 409
+{"detail":"Node name edge-receiver-01.edge.test already exists"}
+```
 
-List the nodes, and pick one of three ways forward:
+Older builds instead let MongoDB's unique index raise, answering `HTTP 500` with
+a `mongoengine.errors.NotUniqueError` traceback in the NodeMan log. If that is
+what you see, the clone predates the fix; `git -C "$TAPIR_NODEMAN_DIR" pull` and
+rebuild. The cause and the remedy are the same either way.
+
+`DELETE /api/v1/node/{name}` answers `HTTP 204` and the name disappears from
+`GET /api/v1/nodes`, but it does not release the name: the document stays in
+`nodeman.nodes` with a `deleted` timestamp and the unique index still holds it,
+so a subsequent `POST` fails with `HTTP 409`.
+
+**That is deliberate.** A node name is a permanent identifier, not a label to be
+recycled: once a name has been enrolled it stays claimed, so a retired node's
+identity can never be silently reassigned to a different node. Plan for names to
+be consumed rather than reused.
+
+The practical consequence for a test deployment is that node records outlive
+Core — they live on the services VM — so a name enrolled by a previous Core is
+still claimed after a rebuild.
+
+List the nodes and pick a way forward:
 
 ```bash
 TAPIR_NODEMAN_ADMIN_URL=http://127.0.0.1:8080
@@ -2374,9 +2429,13 @@ curl --fail --silent --show-error --user username:password \
   "$TAPIR_NODEMAN_ADMIN_URL/api/v1/nodes" | jq '.nodes[].name'
 ```
 
-- enroll a name that has never been used, which is the simplest option for a
-  test deployment;
-- remove the soft-deleted document so the name becomes free again:
+- enroll a name that has never been used. This is the intended path, and the
+  right one for a test deployment: names are cheap, so allocate a fresh one
+  rather than trying to recover an old one;
+- or, in a test environment only, delete the record outright so the name becomes
+  free again. This reaches past the API into the database to undo something the
+  design deliberately prevents, so treat it as a test-rig convenience rather
+  than an operation with any production equivalent:
 
 ```bash
 TAPIR_EDGE_NODE_NAME=edge-receiver-01.edge.test
@@ -2996,7 +3055,11 @@ docker compose --file "$TAPIR_CORE_ANALYSIS_COMPOSE" ps
 - [ ] mqtt-bridge authenticates to Mosquitto with its own client certificate
 - [ ] Mosquitto runs with `user root` so it can read its mode-0600 server key
 - [ ] `mqtt-bridge` connects over `mqtts://` and logs `connection up and ready for use`
+- [ ] `mqtt-bridge/config.toml` is mode 0600; it carries the services VM NATS password
 - [ ] mqtt-bridge uses NodeMan for enrolled Edge data-signing keys
+- [ ] The MQTT signing key arrived in the bundle; none was generated on this host
+- [ ] NodeMan's `trusted-jwks.json` publishes the signing public key, not an empty set
+- [ ] The down bridge relays the encoder's southbound subject to `observations/down/tapir-pop`
 - [ ] Validation sections leave no test containers or test volumes running
 - [ ] Disposable test keys, credentials, payloads, and staged bridge files are removed
 - [ ] Validation output and service logs remain under `$TAPIR_LOGS`

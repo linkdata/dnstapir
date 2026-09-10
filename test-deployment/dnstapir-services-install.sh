@@ -284,6 +284,46 @@ chmod 0644 "$CA_CERT" "$BROKER_DIR/server.crt" "$BRIDGE_DIR/client.crt"
 
 openssl verify -CAfile "$CA_CERT" "$BROKER_DIR/server.crt"
 openssl verify -CAfile "$CA_CERT" "$BRIDGE_DIR/client.crt"
+
+# The MQTT signing key: Core signs downbound observations with the private half
+# and every policy processor verifies against the public half. It lives here so
+# that a Core rebuild does not invalidate processors that already trust it.
+SIGNER_DIR="$TAPIR_SERVICES_CA/mqtt-signer"
+mkdir -p "$SIGNER_DIR"
+chmod 0700 "$SIGNER_DIR"
+
+if [ ! -s "$SIGNER_DIR/mqtt-signer.json" ]; then
+  echo "creating the MQTT signing key"
+  SIGNER_TMP="$(mktemp -d)"
+  openssl genpkey -algorithm Ed25519 -out "$SIGNER_TMP/k.pem"
+  openssl pkey -in "$SIGNER_TMP/k.pem" -outform DER -out "$SIGNER_TMP/priv.der"
+  openssl pkey -in "$SIGNER_TMP/k.pem" -pubout -outform DER -out "$SIGNER_TMP/pub.der"
+  # For Ed25519 both PKCS#8 and SPKI carry the 32-byte key in their last 32
+  # bytes, so a JWK needs no tooling beyond the standard library.
+  python3 - "$SIGNER_TMP" "$SIGNER_DIR" core-mqtt-signer <<'PYSIGNER'
+import base64, json, pathlib, sys
+tmp, out, kid = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+d = (tmp / "priv.der").read_bytes()[-32:]
+x = (tmp / "pub.der").read_bytes()[-32:]
+common = {"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "kid": kid}
+(out / "mqtt-signer.json").write_text(json.dumps({**common, "d": b64(d), "x": b64(x)}))
+(out / "mqtt-signer-pub.json").write_text(json.dumps({**common, "x": b64(x)}))
+PYSIGNER
+  rm -rf "$SIGNER_TMP"
+else
+  echo "reusing the existing MQTT signing key"
+fi
+
+chmod 0600 "$SIGNER_DIR/mqtt-signer.json"
+chmod 0644 "$SIGNER_DIR/mqtt-signer-pub.json"
+python3 -c "
+import json, sys
+p = json.load(open(sys.argv[1])); q = json.load(open(sys.argv[2]))
+assert p['kty'] == 'OKP' and p['crv'] == 'Ed25519' and p['alg'] == 'EdDSA'
+assert 'd' in p and 'd' not in q and p['x'] == q['x']
+print('signing key ok, kid', p['kid'])
+" "$SIGNER_DIR/mqtt-signer.json" "$SIGNER_DIR/mqtt-signer-pub.json"
 openssl x509 -in "$BROKER_DIR/server.crt" -noout -subject -dates -ext subjectAltName
 
 # -- Runbook section 7: credentials and configuration ------------------------
@@ -514,6 +554,10 @@ install -m 0644 "$BROKER_DIR/server.crt"  "$BUNDLE_DIR/ca/server.crt"
 install -m 0600 "$BROKER_DIR/server.key"  "$BUNDLE_DIR/ca/server.key"
 install -m 0644 "$BRIDGE_DIR/client.crt"  "$BUNDLE_DIR/ca/client.crt"
 install -m 0600 "$BRIDGE_DIR/client.key"  "$BUNDLE_DIR/ca/client.key"
+install -m 0600 "$TAPIR_SERVICES_CA/mqtt-signer/mqtt-signer.json" \
+  "$BUNDLE_DIR/ca/mqtt-signer.json"
+install -m 0644 "$TAPIR_SERVICES_CA/mqtt-signer/mqtt-signer-pub.json" \
+  "$BUNDLE_DIR/ca/mqtt-signer-pub.json"
 
 ( umask 077
   cat > "$BUNDLE_DIR/services.env" <<BUNDLEENV
