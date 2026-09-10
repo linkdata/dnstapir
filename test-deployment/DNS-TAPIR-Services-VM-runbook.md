@@ -673,6 +673,24 @@ for attempt in $(seq 1 60); do
 done
 curl -s http://127.0.0.1:8222/healthz | grep -c ok >/dev/null
 
+# The Aggregate Receiver only creates its bucket when it first stores an
+# aggregate, but its healthcheck does head_bucket on every call. Without the
+# bucket the service reports 502 until data happens to arrive, so create it
+# here where the object store lives.
+docker run --rm --network host \
+  --env AWS_ACCESS_KEY_ID="$TAPIR_S3_ACCESS_KEY_ID" \
+  --env AWS_SECRET_ACCESS_KEY="$TAPIR_S3_SECRET_ACCESS_KEY" \
+  --env AWS_DEFAULT_REGION=us-east-1 \
+  amazon/aws-cli:latest --endpoint-url http://127.0.0.1:9000 \
+  s3api create-bucket --bucket aggregates >/dev/null 2>&1 || true
+
+docker run --rm --network host \
+  --env AWS_ACCESS_KEY_ID="$TAPIR_S3_ACCESS_KEY_ID" \
+  --env AWS_SECRET_ACCESS_KEY="$TAPIR_S3_SECRET_ACCESS_KEY" \
+  --env AWS_DEFAULT_REGION=us-east-1 \
+  amazon/aws-cli:latest --endpoint-url http://127.0.0.1:9000 \
+  s3api head-bucket --bucket aggregates >/dev/null
+
 compose ps
 tapir_services_started=1
 trap - EXIT
@@ -1073,6 +1091,7 @@ docker system df -v | head -30
 - [ ] MongoDB has `nodeman` and `aggrec` users with `dbOwner` on their own database only
 - [ ] NATS reports `auth_required` true and has one user per Core service
 - [ ] JetStream reports a `store_dir` on the named volume, not inside the container
+- [ ] The `aggregates` bucket exists, so the Aggregate Receiver's healthcheck passes
 - [ ] **UFW is active** and restricts 27017, 4222 and 9000 to the Core VM address
 - [ ] The ports are unreachable from any address other than the Core VM
 - [ ] The handover bundle contains the CA, both Core certificates, the MQTT

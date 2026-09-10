@@ -4,9 +4,16 @@ Runbooks and scripts for standing up a three-VM DNS TAPIR test environment from
 source. Every DNS TAPIR component is built from a clone rather than pulled as a
 published image, so the deployment is whatever commit you checked out.
 
-The Edge runs both halves of the pipeline: EDM carries observations up to Core,
-and TAPIR-POP brings Core's conclusions back down. Both are needed, because a
+The Edge runs both halves of the pipeline: EDM carries data up to Core, and
+TAPIR-POP brings Core's conclusions back down. Both are needed, because a
 round-trip is what DNS TAPIR's own looptest verifies.
+
+EDM sends two kinds of data up, and both paths are exercised here: `new_qname`
+events over MQTT for names it has not seen, and aggregated histograms over
+signed HTTP to the Aggregate Receiver. Which path a name takes is decided by the
+well-known-domains filter, so the runbook installs the published filter rather
+than a stub — with a stub, practically everything takes the event path and the
+aggregate half is never tested.
 
 ## The three VMs
 
@@ -47,6 +54,7 @@ actually operates.
 |---|---|---|
 | Edge → Core Mosquitto | TLS 1.3 | Client certificate, plus a topic ACL |
 | Core → Edge observations | signed JWS over that MQTT link | Verified against a key NodeMan hands each node at enrolment |
+| Edge → Core aggregates | Plaintext HTTP on the test network | Signed HTTP messages, verified against the node's key from NodeMan |
 | Core services → NATS | Plaintext | Username and password in the URL |
 | Core services → MongoDB | Plaintext | SCRAM, one user per service |
 | Core aggrec → S3 | Plaintext | Access keys |
@@ -79,7 +87,8 @@ Not yet exercised, and worth knowing before you rely on it:
 - The privileged bootstrap on a genuinely fresh host since the runbooks last
   changed.
 - Core sections 8, 9 and 10 (the disposable NodeMan, Aggregate Receiver and MQTT
-  bridge validations).
+  bridge validations). The Aggregate Receiver itself runs persistently and has
+  been exercised end to end; section 9 is a separate throwaway harness.
 - Both firewall sections, and the Edge's Unbound configuration.
 
 ## Conventions
@@ -93,3 +102,15 @@ Not yet exercised, and worth knowing before you rely on it:
   pipeline even though the pattern matched.
 - Validation sections clean up after themselves with exit traps and never delete
   a volume belonging to another section.
+
+## Known differences from a deployed environment
+
+Beyond the obvious ones — single instances, no Kubernetes, the security noted
+above — the analysis stack still uses the integration fixture's NATS subjects
+and bucket names rather than the deployed `internal.*` / `public.to-edge.*`
+namespace, the list checker reads data embedded in its binary instead of a real
+feed and therefore emits `registry_investigation` rather than
+`newly_registered`, and NodeMan issues 60-day certificates where a deployment
+uses 15 with automatic renewal. Observation TTLs and the well-known-domains
+filter *have* been aligned with deployed values, because leaving them at the
+fixture's made the system behave qualitatively differently.

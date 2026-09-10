@@ -53,15 +53,26 @@ This runbook builds an Edge by hand to exercise EDM against a Core installed by
 the companion runbook. A production Edge is installed a different way, and this
 guide should not be used as a template for one.
 
+The aggregate path is enabled here. EDM sends two kinds of data to Core: a
+`new_qname` event over MQTT for a name it has not seen, and an aggregated
+histogram over signed HTTP for names that match the well-known-domains filter.
+The filter decides which path a name takes, so both it and the Aggregate
+Receiver have to be real for either half to mean anything.
+
+`--http-signing-key-file` is the node's enrolled `data.json`. Despite the flag
+help calling it an ECDSA key, EDM loads it as an EdDSA JWK and exports an
+Ed25519 private key from it, and the Aggregate Receiver verifies the signature
+by fetching the matching public key from NodeMan. So an enrolled node can upload
+with no additional key material.
+
 Officially, an Edge is installed from operating-system packages managed by
 systemd, not from containers:
 [`dnstapir-pop`](https://dnstapir.github.io/techdocs/tapir-pop.html) for the
 policy processor, `dnstapir-edm` for the minimiser, `dnstapir-renew` for
 automatic certificate renewal on a systemd timer, and `dnstapir-reloader` to
-`SIGHUP` EDM after a renewal. A production Edge also sends aggregates to the
-Aggregate Receiver over HTTPS, which this runbook does not configure at all: it
-runs EDM with `--disable-histogram-sender` and exercises only the MQTT
-`new_qname` path.
+`SIGHUP` EDM after a renewal. A production Edge sends aggregates to the Aggregate Receiver over HTTPS; this
+runbook sends them over plain HTTP on the test network, but does exercise the
+path — EDM's histogram sender is enabled and Core runs the Aggregate Receiver.
 
 There is also an official container stack,
 [`dnstapir/edge-stack`](https://github.com/dnstapir/edge-stack), which bundles
@@ -120,6 +131,7 @@ export TAPIR_EDGE_UV="$TAPIR_EDGE_TOOLS_VENV/bin/uv"
 export TAPIR_EDGE_DNSTAP_PORT=53535
 export TAPIR_CORE_NODEMAN_PORT=8080
 export TAPIR_CORE_MQTT_PORT=8883
+export TAPIR_CORE_AGGREC_PORT=8090
 export TAPIR_EDM_IMAGE=edm:edge-runtime
 ```
 
@@ -174,7 +186,7 @@ Checklist:
 - [ ] `TAPIR_EDGE_ID` is unique and ends in `.edge.test`.
 - [ ] `dnstapir` is available as the Edge service account name.
 - [ ] Resolver-to-Edge TCP 53535 is routable.
-- [ ] Edge-to-Core TCP 8080 and 8883 are routable.
+- [ ] Edge-to-Core TCP 8080, 8883 and 8090 are routable.
 - [ ] Core runbook Sections 11 and 12 are complete.
 - [ ] Edge can reach GitHub, GHCR, Docker Hub, and Ubuntu repositories.
 - [ ] `nf_tables` is loaded, so the Rootless Docker setup tool can install.
@@ -233,6 +245,7 @@ TAPIR_EDGE_UV=$TAPIR_EDGE_UV
 TAPIR_EDGE_DNSTAP_PORT=$TAPIR_EDGE_DNSTAP_PORT
 TAPIR_CORE_NODEMAN_PORT=$TAPIR_CORE_NODEMAN_PORT
 TAPIR_CORE_MQTT_PORT=$TAPIR_CORE_MQTT_PORT
+TAPIR_CORE_AGGREC_PORT=$TAPIR_CORE_AGGREC_PORT
 TAPIR_EDM_IMAGE=$TAPIR_EDM_IMAGE
 EOF
 ```
@@ -324,6 +337,8 @@ TAPIR_NODEMAN_ALG_PATCH_LOG="$TAPIR_EDGE_LOGS/nodeman-client-jwk-alg.patch"
 TAPIR_CLI_BINARY="$TAPIR_EDGE_BIN/dnstapir-cli"
 TAPIR_DAWG_SOURCE="$TAPIR_EDGE_CONFIG/well-known-domains.csv"
 TAPIR_DAWG_FILE="$TAPIR_EDGE_CONFIG/well-known-domains.dawg"
+TAPIR_DAWG_URL="https://public.test.dnstapir.se/well-known-domains.dawg"
+TAPIR_DAWG_MD5=a99b0adaa5ea091015b9f5bdc5951302
 TAPIR_EDM_CONFIG_FILE="$TAPIR_EDGE_CONFIG/edm.toml"
 TAPIR_EDGE_VERSION_FILE="$TAPIR_EDGE_LOGS/source-versions.txt"
 
@@ -394,13 +409,33 @@ printf '%s\n' \
   '2,example.net' \
   '3,example.org' \
   > "$TAPIR_DAWG_SOURCE"
-"$TAPIR_CLI_BINARY" dawg \
-  --standalone \
-  compile \
-  --format csv \
-  --src "$TAPIR_DAWG_SOURCE" \
-  --dawg "$TAPIR_DAWG_FILE"
+
+# The published filter, not a hand-made stub. The DAWG decides which of the two
+# processing paths a name takes: a match goes to aggregate (histogram)
+# processing, a miss goes to qualitative (new_qname) processing. A stub filter
+# therefore sends practically everything down the event path, which is not how
+# a real Edge behaves.
+if [ ! -s "$TAPIR_DAWG_FILE" ]; then
+  curl --fail --silent --show-error --location \
+    --output "$TAPIR_DAWG_FILE.download" \
+    "$TAPIR_DAWG_URL"
+  TAPIR_DAWG_GOT="$(md5sum "$TAPIR_DAWG_FILE.download" | cut -d' ' -f1)"
+  if [ "$TAPIR_DAWG_GOT" != "$TAPIR_DAWG_MD5" ]; then
+    printf 'well-known-domains.dawg digest %s, expected %s\n' \
+      "$TAPIR_DAWG_GOT" "$TAPIR_DAWG_MD5" >&2
+    printf 'Check the current digest in the DNS TAPIR postinstall documentation.\n' >&2
+    rm -f "$TAPIR_DAWG_FILE.download"
+    false
+  fi
+  mv "$TAPIR_DAWG_FILE.download" "$TAPIR_DAWG_FILE"
+fi
 test -s "$TAPIR_DAWG_FILE"
+printf 'DAWG %s bytes, md5 %s\n' \
+  "$(stat -c %s "$TAPIR_DAWG_FILE")" \
+  "$(md5sum "$TAPIR_DAWG_FILE" | cut -d' ' -f1)"
+
+# The CSV above stays as the worked example for dnstapir-cli dawg compile; it
+# is not what EDM loads.
 
 TAPIR_CRYPTOPAN_KEY="$(openssl rand -hex 32)"
 printf 'cryptopan-key = "%s"\n' "$TAPIR_CRYPTOPAN_KEY" \
@@ -831,7 +866,6 @@ services:
       - --data-dir=/var/lib/dnstapir/edm
       - --minimiser-workers=3
       - --disable-session-files
-      - --disable-histogram-sender
       - --config-file=/etc/dnstapir/keys/edm.toml
       - --well-known-domains-file=/etc/dnstapir/edm/well-known-domains.dawg
       - --mqtt-signing-key-file=/etc/dnstapir/keys/data.json
@@ -839,6 +873,11 @@ services:
       - --mqtt-client-key-file=/etc/dnstapir/keys/tls.key
       - --mqtt-client-cert-file=/etc/dnstapir/keys/tls.crt
       - --mqtt-server=mqtts://$TAPIR_CORE_VM_IP:$TAPIR_CORE_MQTT_PORT
+      - --http-url=http://$TAPIR_CORE_VM_IP:$TAPIR_CORE_AGGREC_PORT
+      - --http-signing-key-file=/etc/dnstapir/keys/data.json
+      - --http-ca-file=/etc/dnstapir/keys/tls-ca.crt
+      - --http-client-key-file=/etc/dnstapir/keys/tls.key
+      - --http-client-cert-file=/etc/dnstapir/keys/tls.crt
       - --metrics-listen-addr=0.0.0.0:2112
       - --debug
 
@@ -2141,6 +2180,8 @@ sudo journalctl --unit unbound --lines 200 --no-pager
 - [ ] POP's keystore was built from NodeMan's `trusted_jwks`, not copied by hand.
 - [ ] POP subscribed to `observations/down/tapir-pop`.
 - [ ] POP processed at least one verified observation from Core.
+- [ ] The well-known-domains filter is the published one, matching its documented digest.
+- [ ] EDM runs without `--disable-histogram-sender` and uploads aggregates to Core.
 - [ ] Certificate renewal succeeds and EDM reconnects.
 
 ## 18. Sources
