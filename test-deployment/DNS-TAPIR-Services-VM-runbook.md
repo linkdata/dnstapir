@@ -285,9 +285,10 @@ certificate requests, so Core receives a *copy* rather than a delegation — the
 same arrangement a deployed NodeMan uses, where the key arrives as a mounted
 secret.
 
-Existing files are reused, so rerunning this block does not silently replace a CA
-that has already issued Edge certificates. That property is the whole point: the
-CA outlives everything else.
+Existing files are reused, so rerunning this block replaces nothing: not the CA
+that has already issued Edge certificates, and not the key Core's broker is
+running with. That property is the whole point — the CA outlives everything
+else, and a re-run is how the bundle is regenerated after a Core rebuild.
 
 ```bash
 set -euo pipefail
@@ -325,56 +326,73 @@ if [ ! -s "$TAPIR_SERVICES_CA_KEY" ] || [ ! -s "$TAPIR_SERVICES_CA_CERT" ]; then
     -addext 'keyUsage=critical,keyCertSign,cRLSign'
 fi
 
-cat > "$TAPIR_SERVICES_BROKER_EXT" <<EOF
+# Reissued only when missing, or when the Core address changed and the
+# certificate no longer carries it. Issuing a new one unconditionally would
+# replace the key Core is running with every time this block is re-read.
+TAPIR_SERVICES_ISSUE_BROKER=0
+if [ ! -s "$TAPIR_SERVICES_BROKER_CERT" ]; then
+  TAPIR_SERVICES_ISSUE_BROKER=1
+elif ! openssl x509 -in "$TAPIR_SERVICES_BROKER_CERT" -noout -text \
+     | grep -c "IP Address:$TAPIR_CORE_VM_IP" >/dev/null; then
+  echo "broker certificate does not carry $TAPIR_CORE_VM_IP; reissuing"
+  TAPIR_SERVICES_ISSUE_BROKER=1
+fi
+
+if [ "$TAPIR_SERVICES_ISSUE_BROKER" -eq 1 ]; then
+  cat > "$TAPIR_SERVICES_BROKER_EXT" <<EOF
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature
 extendedKeyUsage=serverAuth
 subjectAltName=DNS:mosquitto,DNS:dnstapir-core,IP:$TAPIR_CORE_VM_IP
 EOF
 
-openssl req \
-  -new \
-  -newkey ec \
-  -pkeyopt ec_paramgen_curve:P-256 \
-  -nodes \
-  -keyout "$TAPIR_SERVICES_BROKER_KEY" \
-  -out "$TAPIR_SERVICES_BROKER_CSR" \
-  -subj '/CN=dnstapir-core'
-openssl x509 \
-  -req \
-  -in "$TAPIR_SERVICES_BROKER_CSR" \
-  -CA "$TAPIR_SERVICES_CA_CERT" \
-  -CAkey "$TAPIR_SERVICES_CA_KEY" \
-  -CAserial "$TAPIR_SERVICES_CA_SERIAL" \
-  -CAcreateserial \
-  -out "$TAPIR_SERVICES_BROKER_CERT" \
-  -days 825 \
-  -extfile "$TAPIR_SERVICES_BROKER_EXT"
+  openssl req \
+    -new \
+    -newkey ec \
+    -pkeyopt ec_paramgen_curve:P-256 \
+    -nodes \
+    -keyout "$TAPIR_SERVICES_BROKER_KEY" \
+    -out "$TAPIR_SERVICES_BROKER_CSR" \
+    -subj '/CN=dnstapir-core'
+  openssl x509 \
+    -req \
+    -in "$TAPIR_SERVICES_BROKER_CSR" \
+    -CA "$TAPIR_SERVICES_CA_CERT" \
+    -CAkey "$TAPIR_SERVICES_CA_KEY" \
+    -CAserial "$TAPIR_SERVICES_CA_SERIAL" \
+    -CAcreateserial \
+    -out "$TAPIR_SERVICES_BROKER_CERT" \
+    -days 825 \
+    -extfile "$TAPIR_SERVICES_BROKER_EXT"
+fi
 
-cat > "$TAPIR_SERVICES_BRIDGE_EXT" <<'EOF'
+if [ ! -s "$TAPIR_SERVICES_BRIDGE_CERT" ]; then
+  cat > "$TAPIR_SERVICES_BRIDGE_EXT" <<'EOF'
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature
 extendedKeyUsage=clientAuth
 subjectAltName=DNS:mqtt-bridge.core.test
 EOF
 
-openssl req \
-  -new \
-  -newkey ec \
-  -pkeyopt ec_paramgen_curve:P-256 \
-  -nodes \
-  -keyout "$TAPIR_SERVICES_BRIDGE_KEY" \
-  -out "$TAPIR_SERVICES_BRIDGE_CSR" \
-  -subj '/CN=mqtt-bridge.core.test'
-openssl x509 \
-  -req \
-  -in "$TAPIR_SERVICES_BRIDGE_CSR" \
-  -CA "$TAPIR_SERVICES_CA_CERT" \
-  -CAkey "$TAPIR_SERVICES_CA_KEY" \
-  -CAserial "$TAPIR_SERVICES_CA_SERIAL" \
-  -out "$TAPIR_SERVICES_BRIDGE_CERT" \
-  -days 825 \
-  -extfile "$TAPIR_SERVICES_BRIDGE_EXT"
+  openssl req \
+    -new \
+    -newkey ec \
+    -pkeyopt ec_paramgen_curve:P-256 \
+    -nodes \
+    -keyout "$TAPIR_SERVICES_BRIDGE_KEY" \
+    -out "$TAPIR_SERVICES_BRIDGE_CSR" \
+    -subj '/CN=mqtt-bridge.core.test'
+  openssl x509 \
+    -req \
+    -in "$TAPIR_SERVICES_BRIDGE_CSR" \
+    -CA "$TAPIR_SERVICES_CA_CERT" \
+    -CAkey "$TAPIR_SERVICES_CA_KEY" \
+    -CAserial "$TAPIR_SERVICES_CA_SERIAL" \
+    -CAcreateserial \
+    -out "$TAPIR_SERVICES_BRIDGE_CERT" \
+    -days 825 \
+    -extfile "$TAPIR_SERVICES_BRIDGE_EXT"
+fi
 
 chmod 0600 \
   "$TAPIR_SERVICES_CA_KEY" \
@@ -637,6 +655,11 @@ TAPIR_SERVICES_DATA_COMPOSE="$TAPIR_SERVICES_RUN/data-services/compose.yaml"
 TAPIR_SERVICES_CREDS="$TAPIR_SERVICES_KEYS/service-credentials.env"
 TAPIR_SERVICES_STARTUP_LOG="$TAPIR_SERVICES_LOGS/startup.log"
 
+# Compose reads the credentials through --env-file, but the bucket creation
+# below passes two of them to a container of its own, so this shell needs them.
+# shellcheck disable=SC1090
+. "$TAPIR_SERVICES_CREDS"
+
 compose() {
   docker compose --file "$TAPIR_SERVICES_DATA_COMPOSE" \
     --env-file "$TAPIR_SERVICES_CREDS" "$@"
@@ -732,7 +755,7 @@ docker compose --file "$TAPIR_SERVICES_DATA_COMPOSE" \
           print("created " + w.user + "@" + w.db);
         }
       }
-    '
+    ' < /dev/null
 ```
 
 Confirm the per-service accounts exist and JetStream is storing outside the
@@ -755,7 +778,8 @@ docker compose --file "$TAPIR_SERVICES_DATA_COMPOSE" \
     --username "$TAPIR_MONGO_ROOT_USER" \
     --password "$TAPIR_MONGO_ROOT_PASSWORD" \
     --authenticationDatabase admin \
-    --eval 'db.getSiblingDB("nodeman").getUsers().users.map(u => u.user + "@" + u.db)'
+    --eval 'db.getSiblingDB("nodeman").getUsers().users.map(u => u.user + "@" + u.db)' \
+    < /dev/null
 
 docker compose --file "$TAPIR_SERVICES_DATA_COMPOSE" \
   --env-file "$TAPIR_SERVICES_CREDS" exec -T mongo \
@@ -763,12 +787,28 @@ docker compose --file "$TAPIR_SERVICES_DATA_COMPOSE" \
     --username nodeman \
     --password "$TAPIR_MONGO_NODEMAN_PASSWORD" \
     --authenticationDatabase nodeman \
-    --eval 'db.getSiblingDB("nodeman").stats().db'
+    --eval 'db.getSiblingDB("nodeman").stats().db' < /dev/null
+
+# ... and must not reach the other one. The roles are the only thing keeping
+# these two services apart, so assert the negative rather than assuming it.
+if docker compose --file "$TAPIR_SERVICES_DATA_COMPOSE" \
+  --env-file "$TAPIR_SERVICES_CREDS" exec -T mongo \
+  mongosh --quiet \
+    --username nodeman \
+    --password "$TAPIR_MONGO_NODEMAN_PASSWORD" \
+    --authenticationDatabase nodeman \
+    --eval 'db.getSiblingDB("aggregates").stats().db' </dev/null >/dev/null 2>&1
+then
+  echo "the nodeman user can read the aggregates database" >&2
+  exit 1
+fi
+echo "per-database roles are in force"
 ```
 
-`auth_required` must be `true`. The last command proves the per-service user can
-reach its own database; if it can also read `aggregates`, the roles were not
-applied and the initialisation script did not run.
+`auth_required` must be `true`. The two `mongosh` calls are a pair: the first
+proves the per-service user reaches its own database, the second that it reaches
+no other. A user that can read both means `dbOwner` was granted on `admin`
+somewhere, not on the single database named here.
 
 ## 9. Permit access from the Core VM as `[services-admin]`
 
@@ -904,6 +944,7 @@ docker compose --file "$TAPIR_SERVICES_DATA_COMPOSE" \
     --username "$TAPIR_MONGO_ROOT_USER" \
     --password "$TAPIR_MONGO_ROOT_PASSWORD" \
     --authenticationDatabase admin \
+  < /dev/null \
   > "$TAPIR_SERVICES_BACKUP_DIR/mongo.archive.gz"
 test -s "$TAPIR_SERVICES_BACKUP_DIR/mongo.archive.gz"
 
@@ -1057,7 +1098,8 @@ docker compose --file "$TAPIR_SERVICES_DATA_COMPOSE" \
     --username "$TAPIR_MONGO_ROOT_USER" \
     --password "$TAPIR_MONGO_ROOT_PASSWORD" \
     --authenticationDatabase admin \
-    --eval "db.getSiblingDB('nodeman').changeUserPassword('nodeman', '$TAPIR_MONGO_NODEMAN_PASSWORD')"
+    --eval "db.getSiblingDB('nodeman').changeUserPassword('nodeman', '$TAPIR_MONGO_NODEMAN_PASSWORD')" \
+    < /dev/null
 ```
 
 Re-run Section 10 afterwards so Core's bundle carries the new value.
