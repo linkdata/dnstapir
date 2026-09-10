@@ -1562,9 +1562,14 @@ make the two share a Compose project name and a NATS server, so running the
 integration test would tear down the running analysis stack. Keeping them
 separate removes that hazard at the cost of copying four configuration files.
 
-Each copy differs from upstream in exactly one line, the `[nats] url`. Subjects,
-bucket names and TTLs are upstream's, so the analysts behave here as the
-integration test exercises them.
+Each copy differs from upstream in the `[nats] url` and in the observation
+lifetimes. Subjects and bucket names stay as upstream's.
+
+The TTLs are changed deliberately. The fixture expires observations after five
+to twenty seconds so that a `pytest` run finishes quickly; a deployed Core uses
+3600 with a margin of 120. Keeping the fixture values here makes a policy
+processor's lists empty themselves within seconds of being filled, which looks
+like a fault and is not how the system behaves in practice.
 
 ```bash
 (
@@ -1575,6 +1580,10 @@ TAPIR_CORE_ANALYSIS_ROOT="$TAPIR_TEST_ROOT/core-analysis"
 TAPIR_CORE_ANALYSIS_COMPOSE="$TAPIR_CORE_ANALYSIS_ROOT/compose.yaml"
 TAPIR_SERVICES_DIR="$TAPIR_TEST_ROOT/services-bundle"
 TAPIR_IMAGES_ENV="$TAPIR_TEST_ROOT/images.env"
+
+# Deployed values, not the integration fixture's seconds-long ones.
+TAPIR_OBSERVATION_TTL=3600
+TAPIR_TTL_MARGIN=120
 
 test "$(id -un)" = "$TAPIR_SERVICE_USER"
 test -s "$TAPIR_IMAGES_ENV"
@@ -1618,6 +1627,15 @@ tapir_stage_config() {
   sed -i "s|^url = .*|url = \"$TAPIR_STAGE_URL\"|" \
     "$TAPIR_STAGE_DIR/config.toml"
   grep -c "^url = \"nats://" "$TAPIR_STAGE_DIR/config.toml" >/dev/null
+
+  # The fixture's observation lifetimes are seconds, tuned so an integration
+  # test finishes quickly. A deployed Core uses an hour. Left at the fixture
+  # values, observations vanish from a policy processor's lists while you are
+  # still looking at them, which is not how the system behaves in practice.
+  sed -i "s|^ttl = [0-9][0-9]*$|ttl = $TAPIR_OBSERVATION_TTL|" \
+    "$TAPIR_STAGE_DIR/config.toml"
+  sed -i "s|^ttl_margin = [0-9][0-9]*$|ttl_margin = $TAPIR_TTL_MARGIN|" \
+    "$TAPIR_STAGE_DIR/config.toml"
 
   chmod 0600 "$TAPIR_STAGE_DIR/config.toml"
 }
@@ -1855,9 +1873,14 @@ previous, locally generated one.
 
 ### 12.3 Build the persistent NodeMan and mqtt-bridge images
 
-These are the last two images, after the four built in Section 6. Every DNS
+These are the last three images, after the four built in Section 6. Every DNS
 TAPIR process in this deployment now runs a binary compiled from a clone on this
 host, and `$TAPIR_TEST_ROOT/versions.txt` records the commit for each.
+
+The Aggregate Receiver is built here too. It is what closes the second half of
+the Edge-to-Core path: EDM sends `new_qname` events over MQTT for qualitative
+analysis, and aggregated histograms over signed HTTP to this service. Without it
+only half of what an Edge produces has anywhere to go.
 
 The `mqtt-bridge` image uses a multistage build, so no host bind-mounted output
 directory is involved and the earlier file-ownership problem cannot recur.
@@ -1867,13 +1890,16 @@ set -euo pipefail
 
 TAPIR_NODEMAN_SOURCE="$TAPIR_SRC/nodeman"
 TAPIR_MQTT_BRIDGE_SOURCE="$TAPIR_SRC/mqtt-bridge"
+TAPIR_AGGREC_SOURCE="$TAPIR_SRC/aggrec"
 TAPIR_CORE_RUNTIME_ROOT="$TAPIR_TEST_ROOT/core-runtime"
 TAPIR_CORE_MQTT_BRIDGE_DOCKERFILE="$TAPIR_CORE_RUNTIME_ROOT/mqtt-bridge.Dockerfile"
 TAPIR_CORE_MQTT_BRIDGE_IMAGE=mqtt-bridge:core-runtime
 TAPIR_CORE_NODEMAN_IMAGE=nodeman:core-runtime
+TAPIR_CORE_AGGREC_IMAGE=aggrec:core-runtime
 
 test -d "$TAPIR_NODEMAN_SOURCE/.git"
 test -d "$TAPIR_MQTT_BRIDGE_SOURCE/.git"
+test -d "$TAPIR_AGGREC_SOURCE/.git"
 mkdir -p "$TAPIR_CORE_RUNTIME_ROOT"
 
 cat > "$TAPIR_CORE_MQTT_BRIDGE_DOCKERFILE" <<'EOF'
@@ -1892,12 +1918,17 @@ docker build \
   --tag "$TAPIR_CORE_NODEMAN_IMAGE" \
   "$TAPIR_NODEMAN_SOURCE"
 docker build \
+  --tag "$TAPIR_CORE_AGGREC_IMAGE" \
+  "$TAPIR_AGGREC_SOURCE"
+docker build \
   --tag "$TAPIR_CORE_MQTT_BRIDGE_IMAGE" \
   --file "$TAPIR_CORE_MQTT_BRIDGE_DOCKERFILE" \
   "$TAPIR_MQTT_BRIDGE_SOURCE"
 
 docker image inspect "$TAPIR_CORE_NODEMAN_IMAGE" \
   --format 'nodeman={{.Id}} size={{.Size}}'
+docker image inspect "$TAPIR_CORE_AGGREC_IMAGE" \
+  --format 'aggrec={{.Id}} size={{.Size}}'
 docker image inspect "$TAPIR_CORE_MQTT_BRIDGE_IMAGE" \
   --format 'mqtt-bridge={{.Id}} size={{.Size}}'
 ```
@@ -1929,6 +1960,10 @@ TAPIR_CORE_BRIDGE_SCHEMA="$TAPIR_CORE_BRIDGE_DIR/new_qname.json"
 TAPIR_CORE_BRIDGE_SCHEMA_DOWN="$TAPIR_CORE_BRIDGE_DIR/edge_observations.json"
 TAPIR_CORE_MQTT_BRIDGE_IMAGE=mqtt-bridge:core-runtime
 TAPIR_CORE_NODEMAN_IMAGE=nodeman:core-runtime
+TAPIR_CORE_AGGREC_IMAGE=aggrec:core-runtime
+TAPIR_CORE_AGGREC_DIR="$TAPIR_CORE_RUNTIME_ROOT/aggrec"
+TAPIR_CORE_AGGREC_CONFIG="$TAPIR_CORE_AGGREC_DIR/aggrec.toml"
+TAPIR_CORE_AGGREC_PORT=8090
 TAPIR_SERVICES_DIR="$TAPIR_TEST_ROOT/services-bundle"
 
 # Each block stands alone in a fresh shell, so the services credentials are
@@ -1944,7 +1979,8 @@ test -n "$TAPIR_SERVICES_NATS_BRIDGE_URL"
 mkdir -p \
   "$TAPIR_CORE_NODEMAN_DIR" \
   "$TAPIR_CORE_MOSQUITTO_DIR" \
-  "$TAPIR_CORE_BRIDGE_DIR"
+  "$TAPIR_CORE_BRIDGE_DIR" \
+  "$TAPIR_CORE_AGGREC_DIR"
 test -s "$TAPIR_CORE_CA_KEY"
 test -s "$TAPIR_CORE_CA_CERT"
 test -s "$TAPIR_CORE_BROKER_PKI_DIR/server.key"
@@ -1979,6 +2015,7 @@ validity_days = 60
 
 [nodes]
 nodeman_url = "http://$TAPIR_CORE_VM_IP:8080"
+aggrec_url = "http://$TAPIR_CORE_VM_IP:$TAPIR_CORE_AGGREC_PORT"
 domain = "edge.test"
 trusted_jwks = "/etc/dnstapir/nodeman/trusted-jwks.json"
 mqtt_broker = "mqtts://$TAPIR_CORE_VM_IP:8883"
@@ -2049,6 +2086,39 @@ TAPIR_CORE_SOUTHBOUND_SUBJECT="$(awk -F'"' '/^subject_southbound/ { print $2; ex
   "$TAPIR_TEST_ROOT/core-analysis/observation-encoder/config.toml")"
 test -n "$TAPIR_CORE_SOUTHBOUND_SUBJECT"
 
+# The Aggregate Receiver authenticates an upload by verifying the HTTP message
+# signature against the sender's public key, which it fetches from NodeMan by
+# key id. That is why clients_database points back at NodeMan rather than at a
+# static file: an enrolled node is automatically able to upload.
+cat > "$TAPIR_CORE_AGGREC_CONFIG" <<EOF
+metadata_base_url = "http://$TAPIR_CORE_VM_IP:$TAPIR_CORE_AGGREC_PORT"
+clients_database = "http://nodeman:8080/api/v1/node/{key_id}/public_key"
+
+[s3]
+endpoint_url = "$TAPIR_SERVICES_S3_ENDPOINT"
+bucket = "aggregates"
+create_bucket = true
+access_key_id = "$TAPIR_SERVICES_S3_ACCESS_KEY_ID"
+secret_access_key = "$TAPIR_SERVICES_S3_SECRET_ACCESS_KEY"
+
+[mongodb]
+server = "$TAPIR_SERVICES_MONGO_AGGREC_URL"
+
+[http]
+trusted_hosts = ["0.0.0.0/0"]
+healthcheck_hosts = ["0.0.0.0/0"]
+stats_hosts = ["0.0.0.0/0"]
+
+[nats]
+servers = ["$TAPIR_SERVICES_NATS_AGGREC_URL"]
+subject = "aggregates"
+
+[key_cache]
+size = 1000
+ttl = 300
+EOF
+chmod 0600 "$TAPIR_CORE_AGGREC_CONFIG"
+
 cat > "$TAPIR_CORE_BRIDGE_CONFIG" <<EOF
 Debug = true
 
@@ -2114,6 +2184,19 @@ services:
       - mosquitto
     volumes:
       - $TAPIR_CORE_BRIDGE_DIR:/etc/dnstapir/mqtt-bridge:ro
+
+  aggrec:
+    image: $TAPIR_CORE_AGGREC_IMAGE
+    user: "0:0"
+    restart: unless-stopped
+    depends_on:
+      - nodeman
+    environment:
+      AGGREC_CONFIG: /etc/dnstapir/aggrec/aggrec.toml
+    ports:
+      - "0.0.0.0:$TAPIR_CORE_AGGREC_PORT:8080/tcp"
+    volumes:
+      - $TAPIR_CORE_AGGREC_DIR:/etc/dnstapir/aggrec:ro
 EOF
 
 chmod 0600 \
@@ -2213,6 +2296,7 @@ set -euo pipefail
 
 TAPIR_CORE_RUNTIME_ROOT="$TAPIR_TEST_ROOT/core-runtime"
 TAPIR_CORE_RUNTIME_COMPOSE="$TAPIR_CORE_RUNTIME_ROOT/compose.yaml"
+TAPIR_CORE_AGGREC_PORT=8090
 TAPIR_SERVICES_DIR="$TAPIR_TEST_ROOT/services-bundle"
 TAPIR_CORE_CA_CERT="$TAPIR_CORE_RUNTIME_ROOT/ca/ca.crt"
 TAPIR_CORE_BRIDGE_KEY="$TAPIR_CORE_RUNTIME_ROOT/mqtt-bridge/client.key"
@@ -2251,18 +2335,19 @@ docker compose --file "$TAPIR_CORE_RUNTIME_COMPOSE" \
 TAPIR_CORE_RUNTIME_PORT_CONTAINERS="$({
   docker ps -q --filter publish=8080
   docker ps -q --filter publish=8883
+  docker ps -q --filter publish=8090
 } | sort -u)"
 TAPIR_CORE_RUNTIME_PORT_LISTENERS="$(
-  ss -H -ltn | awk '$4 ~ /:(8080|8883)$/' || true
+  ss -H -ltn | awk '$4 ~ /:(8080|8883|8090)$/' || true
 )"
 if [ -n "$TAPIR_CORE_RUNTIME_PORT_CONTAINERS" ] || \
    [ -n "$TAPIR_CORE_RUNTIME_PORT_LISTENERS" ]; then
-  echo 'Core runtime ports 8080 or 8883 are already in use:' >&2
-  docker ps --filter publish=8080 \
-    --format 'port 8080: {{.ID}} {{.Names}} {{.Image}} {{.Ports}}'
-  docker ps --filter publish=8883 \
-    --format 'port 8883: {{.ID}} {{.Names}} {{.Image}} {{.Ports}}'
-  ss -H -ltn | awk '$4 ~ /:(8080|8883)$/'
+  echo 'Core runtime ports 8080, 8883 or 8090 are already in use:' >&2
+  for TAPIR_CORE_BUSY_PORT in 8080 8883 8090; do
+    docker ps --filter "publish=$TAPIR_CORE_BUSY_PORT" \
+      --format "port $TAPIR_CORE_BUSY_PORT: {{.ID}} {{.Names}} {{.Image}} {{.Ports}}"
+  done
+  ss -H -ltn | awk '$4 ~ /:(8080|8883|8090)$/'
   false
 fi
 
@@ -2311,6 +2396,17 @@ openssl s_client \
   < /dev/null 2>&1 \
   | tee "$TAPIR_LOGS/core-mqtt-tls-check.log" \
   | grep -c 'Verification: OK' >/dev/null
+
+docker compose --file "$TAPIR_CORE_RUNTIME_COMPOSE" up -d aggrec
+for attempt in $(seq 1 30); do
+  if curl --fail --silent \
+    "http://127.0.0.1:$TAPIR_CORE_AGGREC_PORT/api/v1/healthcheck" >/dev/null; then
+    break
+  fi
+  sleep 2
+done
+curl --fail --silent \
+  "http://127.0.0.1:$TAPIR_CORE_AGGREC_PORT/api/v1/healthcheck" >/dev/null
 
 docker compose --file "$TAPIR_CORE_RUNTIME_COMPOSE" up -d mqtt-bridge
 sleep 3
@@ -2363,6 +2459,12 @@ sudo ufw allow \
   to any \
   port 8883 \
   comment 'DNS TAPIR Edge MQTT TLS'
+sudo ufw allow \
+  proto tcp \
+  from "$TAPIR_EDGE_VM_IP" \
+  to any \
+  port 8090 \
+  comment 'DNS TAPIR Edge aggregate upload'
 sudo ufw status numbered
 ```
 
@@ -2729,6 +2831,7 @@ set -euo pipefail
 TAPIR_CORE_INTEGRATION_DIR="$TAPIR_SRC/core-integration-test"
 TAPIR_CORE_ANALYSIS_COMPOSE="$TAPIR_TEST_ROOT/core-analysis/compose.yaml"
 TAPIR_CORE_RUNTIME_COMPOSE="$TAPIR_TEST_ROOT/core-runtime/compose.yaml"
+TAPIR_CORE_AGGREC_PORT=8090
 TAPIR_CORE_CA_CERT="$TAPIR_TEST_ROOT/core-runtime/ca/ca.crt"
 TAPIR_CORE_BRIDGE_KEY="$TAPIR_TEST_ROOT/core-runtime/mqtt-bridge/client.key"
 TAPIR_CORE_BRIDGE_CERT="$TAPIR_TEST_ROOT/core-runtime/mqtt-bridge/client.crt"
@@ -2827,6 +2930,17 @@ openssl s_client \
   -cert "$TAPIR_CORE_BRIDGE_CERT" \
   -key "$TAPIR_CORE_BRIDGE_KEY" \
   < /dev/null 2>&1 | grep -c 'Verification: OK' >/dev/null
+
+docker compose --file "$TAPIR_CORE_RUNTIME_COMPOSE" up -d aggrec
+for attempt in $(seq 1 30); do
+  if curl --fail --silent \
+    "http://127.0.0.1:$TAPIR_CORE_AGGREC_PORT/api/v1/healthcheck" >/dev/null; then
+    break
+  fi
+  sleep 2
+done
+curl --fail --silent \
+  "http://127.0.0.1:$TAPIR_CORE_AGGREC_PORT/api/v1/healthcheck" >/dev/null
 
 docker compose --file "$TAPIR_CORE_RUNTIME_COMPOSE" up -d mqtt-bridge
 sleep 3
@@ -3060,6 +3174,9 @@ docker compose --file "$TAPIR_CORE_ANALYSIS_COMPOSE" ps
 - [ ] The MQTT signing key arrived in the bundle; none was generated on this host
 - [ ] NodeMan's `trusted-jwks.json` publishes the signing public key, not an empty set
 - [ ] The down bridge relays the encoder's southbound subject to `observations/down/tapir-pop`
+- [ ] Analysis observation TTLs are the deployed 3600, not the fixture's seconds
+- [ ] Aggregate Receiver runs persistently and answers its healthcheck
+- [ ] NodeMan publishes `aggrec_url`, so enrolled nodes learn where to upload
 - [ ] Validation sections leave no test containers or test volumes running
 - [ ] Disposable test keys, credentials, payloads, and staged bridge files are removed
 - [ ] Validation output and service logs remain under `$TAPIR_LOGS`

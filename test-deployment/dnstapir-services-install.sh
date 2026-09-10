@@ -479,6 +479,20 @@ done
 curl -fsS http://127.0.0.1:8222/healthz | grep -c ok >/dev/null \
   || { echo "NATS did not become healthy" >&2; compose logs --tail=50 nats >&2; exit 1; }
 
+# aggrec creates its bucket only when storing an aggregate, but its healthcheck
+# does head_bucket on every call, so make the bucket up front or the Aggregate
+# Receiver reports 502 until data happens to arrive.
+awscli() {
+  docker run --rm --network host \
+    --env AWS_ACCESS_KEY_ID="$TAPIR_S3_ACCESS_KEY_ID" \
+    --env AWS_SECRET_ACCESS_KEY="$TAPIR_S3_SECRET_ACCESS_KEY" \
+    --env AWS_DEFAULT_REGION=us-east-1 \
+    amazon/aws-cli:latest --endpoint-url http://127.0.0.1:9000 "$@"
+}
+awscli s3api create-bucket --bucket aggregates >/dev/null 2>&1 || true
+awscli s3api head-bucket --bucket aggregates >/dev/null
+echo "aggregates bucket present"
+
 # The per-service users are created here rather than through
 # /docker-entrypoint-initdb.d. That hook runs as the mongodb account after the
 # entrypoint drops privileges, so it cannot read a mode-0600 file owned by the
