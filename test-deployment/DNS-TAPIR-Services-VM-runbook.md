@@ -535,6 +535,8 @@ http: 0.0.0.0:8222
 
 jetstream {
   store_dir: "/data/jetstream"
+  max_file_store: 8GB
+  max_memory_store: 256MB
 }
 
 accounts {
@@ -553,6 +555,13 @@ accounts {
 EOF
 chmod 0600 "$TAPIR_SERVICES_DATA_DIR/nats.conf"
 ```
+
+JetStream is given a ceiling because it has no natural one. `seen_domains` is
+deliberately unbounded -- forgetting a name would make the new-qname analyst
+report it as globally new all over again -- so without a limit the store grows
+for as long as the deployment runs. A deployment sets the same kind of ceiling,
+at 24 GiB on a 100 GiB volume; 8 GB is generous for a test bed and is still a
+limit rather than the whole disk.
 
 All six users share one account, so they share the same subject space and
 JetStream store. That is deliberate: it matches how a deployed Core is
@@ -981,6 +990,10 @@ interpolates.
 Copy the backup off this VM. A backup that exists only on the host it protects is
 not a backup.
 
+Section 12 has the timer that runs all of this on a schedule and keeps a bounded
+number of generations. Restoring is still a manual, and so far unrehearsed,
+procedure — which is the part of this section most worth changing.
+
 ## 12. Operating commands as `[services-service]`
 
 ```bash
@@ -1062,6 +1075,47 @@ docker compose --file "$TAPIR_SERVICES_RUN/data-services/compose.yaml" \
 
 Never use `down --volumes` here. It deletes every node record, every JetStream
 bucket and every stored aggregate at once.
+
+### Automated maintenance
+
+Section 11 describes a backup. A described backup is not a backup, and this is
+the only host with state worth keeping.
+
+`dnstapir-maintenance.sh` runs Section 11 and the rest of this host's periodic
+work. Install it as a systemd user timer, which needs no root because the
+service account already has lingering:
+
+```bash
+./dnstapir-maintenance.sh --dry-run
+./dnstapir-maintenance.sh
+./dnstapir-maintenance.sh --install --on-calendar daily
+```
+
+Daily rather than hourly: the volume copies need NATS and the object store
+stopped for a few seconds, and there is no reason to interrupt them more often
+than that. MongoDB is dumped online and is not affected.
+
+Each run writes one generation under `$TAPIR_SERVICES_ROOT/backup` and keeps
+seven, then reminds you that a backup living only on the host it protects is not
+a backup. Copying it off is still yours to arrange; nothing here can guess a
+destination it is allowed to write to.
+
+It also:
+
+- **Deletes stored aggregates older than 90 days**, object and metadata
+  together, in that order — an interrupted run then leaves a document pointing
+  at nothing, which is visible and repairable, rather than an object nothing
+  refers to, which nothing would ever find again. `--aggregate-days 0` turns
+  retention off.
+- **Reports the CA and issued certificates**, failing if any is within 30 days
+  of expiry. Reissuing one means re-running Section 10 so Core gets a bundle
+  that matches.
+- **Checks that UFW is active.** The rules from Section 9 are recorded whether
+  or not the firewall is running, and they are the only control in front of
+  MongoDB, NATS and the object store, so the state has to be asserted rather
+  than assumed. This is the check most likely to fail on a test network where
+  the firewall was never switched on.
+- **Reports JetStream usage** against the ceiling Section 7 sets.
 
 ## 13. Troubleshooting as `[services-service]`
 

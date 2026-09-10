@@ -369,6 +369,8 @@ http: 0.0.0.0:8222
 
 jetstream {
   store_dir: "/data/jetstream"
+  max_file_store: 8GB
+  max_memory_store: 256MB
 }
 
 accounts {

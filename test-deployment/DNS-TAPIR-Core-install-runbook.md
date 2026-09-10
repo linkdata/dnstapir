@@ -2217,6 +2217,12 @@ EOF
 # bridge still reads it.
 chmod 0600 "$TAPIR_CORE_BRIDGE_CONFIG"
 
+# NodeMan and the Aggregate Receiver declare a healthcheck against the same
+# /api/v1/healthcheck endpoint a deployment probes. Compose will not restart an
+# unhealthy container on its own -- that is a Kubernetes liveness probe, not a
+# Compose one -- but it makes the difference between "running" and "working"
+# visible to docker ps, which is what the maintenance script reports on.
+# Both images carry Python and neither carries curl, so the probe uses Python.
 cat > "$TAPIR_CORE_RUNTIME_COMPOSE" <<EOF
 services:
   nodeman:
@@ -2230,6 +2236,12 @@ services:
     volumes:
       - $TAPIR_CORE_NODEMAN_DIR:/etc/dnstapir/nodeman:ro
       - $TAPIR_CORE_CA_DIR:/etc/dnstapir/nodeman-ca:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/api/v1/healthcheck', timeout=5).status == 200 else 1)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   mosquitto:
     image: eclipse-mosquitto:2.0.21-openssl
@@ -2264,6 +2276,12 @@ services:
       - "0.0.0.0:$TAPIR_CORE_AGGREC_PORT:8080/tcp"
     volumes:
       - $TAPIR_CORE_AGGREC_DIR:/etc/dnstapir/aggrec:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/api/v1/healthcheck', timeout=5).status == 200 else 1)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 EOF
 
 chmod 0600 \
@@ -3017,6 +3035,49 @@ docker compose --file "$TAPIR_CORE_RUNTIME_COMPOSE" ps
 TAPIR_CORE_KEEP_RUNNING=1
 )
 ```
+
+### Automated maintenance
+
+`restart: unless-stopped` covers a container that exits. It does not cover a
+container that stays up and stops doing its job, and Core has produced exactly
+that failure: an `mqtt-bridge` holding a stale validation key stays connected,
+logs nothing unusual at startup, and discards every message it receives.
+
+`dnstapir-maintenance.sh` is the periodic check for this host. Run it once by
+hand first, then install it as a systemd user timer, which needs no root because
+the service account already has lingering:
+
+```bash
+./dnstapir-maintenance.sh --dry-run
+./dnstapir-maintenance.sh
+./dnstapir-maintenance.sh --install --on-calendar hourly
+```
+
+It reports on every run and exits non-zero when a check fails, so a bad run is
+visible in `systemctl --user list-units --failed` rather than only in the
+journal. On this host it checks four things:
+
+- **Broker certificates.** These are 825-day certificates issued on the services
+  VM, so this is a report rather than a renewal; a failure means going back to
+  that host's Section 6 and regenerating the handover bundle.
+- **Observation bucket lifetimes.** The regression guard for the trap Section 11
+  describes: the lifetime that reaches a policy processor comes from the
+  JetStream bucket, which outlives Core, not from the configuration file that
+  Section 11 rewrites. A bucket below the deployed 3600 fails the run.
+- **Discarded MQTT messages.** Any `Bad signature` in the last twenty-four hours
+  fails, because the bridge does not recover from it on its own. Restarting
+  `mqtt-bridge` is the fix; `mqtt-bridge#121` is the cause.
+- **Unhealthy containers.** NodeMan and the Aggregate Receiver declare a
+  healthcheck against the endpoint a deployment probes. Compose will not restart
+  an unhealthy container — that is a Kubernetes liveness probe, not a Compose
+  one — so this is where it becomes visible.
+
+The build cache is pruned of anything unused for a week. Images and volumes are
+never touched: they are the deployment.
+
+What this does **not** do is prove that observations still travel. That check
+needs both ends and lives on the Edge, in Section 14.4 of its runbook. Run it
+there, not here.
 
 ## 14. Troubleshooting as `dnstapir`
 
