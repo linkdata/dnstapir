@@ -1110,11 +1110,18 @@ It also:
 - **Reports the CA and issued certificates**, failing if any is within 30 days
   of expiry. Reissuing one means re-running Section 10 so Core gets a bundle
   that matches.
-- **Checks that UFW is active.** The rules from Section 9 are recorded whether
-  or not the firewall is running, and they are the only control in front of
-  MongoDB, NATS and the object store, so the state has to be asserted rather
-  than assumed. This is the check most likely to fail on a test network where
-  the firewall was never switched on.
+- **Checks that UFW is enforcing, and that it will still be after a reboot.**
+  The rules from Section 9 are recorded whether or not the firewall is running,
+  and they are the only control in front of MongoDB, NATS and the object store.
+  `ufw status` is not how it checks: that needs root, and this account has none,
+  so it answers `You need to be root to run this script` whatever the firewall
+  is doing. It reads `ENABLED` from `/etc/ufw/ufw.conf` — the flag `ufw` itself
+  consults at boot — together with whether `ufw.service` is active and enabled.
+  Those are two separate findings, because a firewall that is up now but whose
+  unit is disabled is a problem that appears only after the next reboot.
+
+  `ufw enable` sets both, so no additional configuration is needed to make the
+  firewall persistent.
 - **Reports JetStream usage** against the ceiling Section 7 sets.
 
 ## 13. Troubleshooting as `[services-service]`

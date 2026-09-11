@@ -628,13 +628,34 @@ services_state_report() {
     || fail "NATS monitoring endpoint did not answer"
   docker system df -v 2>/dev/null | sed -n '/VOLUME NAME/,/^$/p' | sed 's/^/   /'
 
+}
+
+services_firewall() {
   task "firewall"
-  # The only control in front of MongoDB, NATS and the object store. The rules
-  # are recorded whether or not UFW is running, so the state has to be checked.
-  if ufw status 2>/dev/null | head -1 | grep -c 'Status: active' >/dev/null; then
-    note "UFW active"
+  # The only control in front of MongoDB, NATS and the object store, so its
+  # state is asserted rather than assumed.
+  #
+  # Not "ufw status": that needs root, and this account has none, so it answers
+  # "You need to be root to run this script" whatever the firewall is doing.
+  # These three are readable unprivileged -- ENABLED is the flag ufw itself
+  # consults at boot, and the unit is what applies it.
+  tapir_ufw_enabled="$(awk -F= '/^ENABLED=/ { print tolower($2) }' \
+    /etc/ufw/ufw.conf 2>/dev/null || true)"
+  tapir_ufw_active="$(systemctl is-active ufw 2>/dev/null || true)"
+  tapir_ufw_boot="$(systemctl is-enabled ufw 2>/dev/null || true)"
+
+  if [ "$tapir_ufw_enabled" = yes ] && [ "$tapir_ufw_active" = active ]; then
+    note "UFW enforcing"
   else
-    fail "UFW is inactive: MongoDB, NATS and the object store are open to the test network"
+    fail "UFW is not enforcing (ENABLED=${tapir_ufw_enabled:-unset}, unit ${tapir_ufw_active:-unknown}): MongoDB, NATS and the object store are open to the test network"
+  fi
+
+  # Separate from the above: a firewall that is up now but will not come back is
+  # a problem that only appears after the next reboot.
+  if [ "$tapir_ufw_boot" = enabled ]; then
+    note "ufw.service starts at boot"
+  else
+    fail "ufw.service is ${tapir_ufw_boot:-unknown}, so the firewall will not survive a reboot"
   fi
 }
 
@@ -674,6 +695,7 @@ case "$role" in
   services)
     services_certificates
     services_state_report
+    services_firewall
     services_prune_aggregates
     services_backup
     prune_build_cache
