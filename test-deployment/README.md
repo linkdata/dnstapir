@@ -49,6 +49,9 @@ observation buckets rather than trusting its own configuration.
 - `dnstapir-maintenance.sh` — the periodic upkeep, for all three hosts. It picks
   its role from the login environment the bootstrap wrote, and `--install` adds
   a systemd user timer. See **Maintenance** below.
+- `dnstapir-seen-domains.sh` — dumps the `seen_domains` KV bucket to stdout as
+  CSV: every name any Edge has ever reported, which node reported it, and when.
+  Runs on Core or the services VM, read-only, no arguments needed.
 
 Everything after the bootstrap runs as an unprivileged `dnstapir` account with
 Rootless Docker. That account has no `sudo` and is not in the `docker` group.
